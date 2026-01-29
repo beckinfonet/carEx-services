@@ -69,6 +69,7 @@ const carSchema = new mongoose.Schema({
   seats: Number,
   doors: Number,
   phoneNumber: String,
+  listingId: String,
 });
 
 const Car = mongoose.model('Car', carSchema);
@@ -111,6 +112,15 @@ app.post('/api/cars', upload.array('images', 5), async (req, res) => {
       }
     }
 
+    // Generate unique Listing ID
+    let listingId;
+    let isUnique = false;
+    while (!isUnique) {
+      listingId = `${Math.floor(100 + Math.random() * 900)}-${Math.floor(100 + Math.random() * 900)}`;
+      const existing = await Car.findOne({ listingId });
+      if (!existing) isUnique = true;
+    }
+
     const newCar = new Car({
       make, model, year, price, mileage, fuel,
       currency: currency || '$',
@@ -118,7 +128,8 @@ app.post('/api/cars', upload.array('images', 5), async (req, res) => {
       engine, transmission, drivetrain, mpg, condition,
       knownIssues: parsedKnownIssues,
       exteriorColor, interiorColor, interiorMaterial,
-      seats, doors, phoneNumber
+      seats, doors, phoneNumber,
+      listingId,
     });
 
     await newCar.save();
