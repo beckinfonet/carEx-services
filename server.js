@@ -68,6 +68,7 @@ const carSchema = new mongoose.Schema({
   interiorMaterial: String,
   seats: Number,
   doors: Number,
+  phoneNumber: String,
 });
 
 const Car = mongoose.model('Car', carSchema);
@@ -94,7 +95,7 @@ app.post('/api/cars', upload.array('images', 5), async (req, res) => {
     const {
       make, model, year, price, mileage, fuel, currency, description, bodyType,
       engine, transmission, drivetrain, mpg, condition, knownIssues,
-      exteriorColor, interiorColor, interiorMaterial, seats, doors
+      exteriorColor, interiorColor, interiorMaterial, seats, doors, phoneNumber
     } = req.body;
 
     // Map uploaded files to locations
@@ -117,7 +118,7 @@ app.post('/api/cars', upload.array('images', 5), async (req, res) => {
       engine, transmission, drivetrain, mpg, condition,
       knownIssues: parsedKnownIssues,
       exteriorColor, interiorColor, interiorMaterial,
-      seats, doors
+      seats, doors, phoneNumber
     });
 
     await newCar.save();
