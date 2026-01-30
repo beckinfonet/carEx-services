@@ -83,6 +83,8 @@ const userSchema = new mongoose.Schema({
   lastName: String,
   phoneNumber: String,
   telegramUsername: String,
+  sellerStatus: { type: String, enum: ['NONE', 'PENDING', 'APPROVED', 'REJECTED'], default: 'NONE' },
+  sellerRequestDate: Date,
   createdAt: { type: Date, default: Date.now },
 });
 
@@ -146,6 +148,24 @@ app.put('/api/users/:uid', async (req, res) => {
     res.json(user);
   } catch (error) {
     console.error('Update User Error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Request Seller Status
+app.post('/api/users/:uid/request-seller', async (req, res) => {
+  try {
+    const user = await User.findOneAndUpdate(
+      { firebaseUid: req.params.uid },
+      { 
+        sellerStatus: 'PENDING',
+        sellerRequestDate: new Date()
+      },
+      { new: true }
+    );
+    res.json(user);
+  } catch (error) {
+    console.error('Request Seller Error:', error);
     res.status(500).json({ message: error.message });
   }
 });
