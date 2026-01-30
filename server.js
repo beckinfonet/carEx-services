@@ -85,10 +85,19 @@ const userSchema = new mongoose.Schema({
   telegramUsername: String,
   sellerStatus: { type: String, enum: ['NONE', 'PENDING', 'APPROVED', 'REJECTED'], default: 'NONE' },
   sellerRequestDate: Date,
+  isPhoneVerified: { type: Boolean, default: false },
   createdAt: { type: Date, default: Date.now },
 });
 
 const User = mongoose.model('User', userSchema);
+
+// OTP Schema
+const otpSchema = new mongoose.Schema({
+  phoneNumber: { type: String, required: true },
+  code: { type: String, required: true },
+  createdAt: { type: Date, default: Date.now, expires: 300 } // Expires in 5 minutes
+});
+const OTP = mongoose.model('OTP', otpSchema);
 
 // Routes
 app.get('/', (req, res) => {
@@ -157,7 +166,7 @@ app.post('/api/users/:uid/request-seller', async (req, res) => {
   try {
     const user = await User.findOneAndUpdate(
       { firebaseUid: req.params.uid },
-      { 
+      {
         sellerStatus: 'PENDING',
         sellerRequestDate: new Date()
       },
@@ -171,6 +180,70 @@ app.post('/api/users/:uid/request-seller', async (req, res) => {
 });
 
 // --- End User Routes ---
+
+// --- OTP Routes ---
+
+// Send OTP
+app.post('/api/otp/send', async (req, res) => {
+  try {
+    const { phoneNumber } = req.body;
+    if (!phoneNumber) return res.status(400).json({ message: 'Phone number required' });
+
+    // Generate 6-digit code
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+
+    // Save to DB (upsert)
+    await OTP.findOneAndUpdate(
+      { phoneNumber },
+      { code, createdAt: new Date() },
+      { upsert: true, new: true }
+    );
+
+    // In a real app, integrate Twilio/SNS here.
+    // For now, log to console for testing/demo.
+    console.log(`[OTP] Code for ${phoneNumber}: ${code}`);
+
+    res.json({ message: 'OTP sent' });
+  } catch (error) {
+    console.error('Send OTP Error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Verify OTP
+app.post('/api/otp/verify', async (req, res) => {
+  try {
+    const { phoneNumber, code, firebaseUid } = req.body;
+
+    // Check OTP
+    const record = await OTP.findOne({ phoneNumber });
+
+    // Backdoor for App Store Review / Testing (Code: 123456)
+    const isTestCode = code === '123456';
+
+    if (!isTestCode && (!record || record.code !== code)) {
+      return res.status(400).json({ message: 'Invalid or expired code' });
+    }
+
+    // Mark user as verified
+    if (firebaseUid) {
+      await User.findOneAndUpdate(
+        { firebaseUid },
+        { isPhoneVerified: true, phoneNumber } // Ensure phone is synced
+      );
+    }
+
+    // Clean up OTP
+    if (record) await OTP.deleteOne({ _id: record._id });
+
+    res.json({ message: 'Phone verified successfully' });
+  } catch (error) {
+    console.error('Verify OTP Error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// --- End OTP Routes ---
 
 // Upload and create car
 app.post('/api/cars', upload.array('images', 25), async (req, res) => {
