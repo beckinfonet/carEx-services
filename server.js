@@ -75,6 +75,19 @@ const carSchema = new mongoose.Schema({
 
 const Car = mongoose.model('Car', carSchema);
 
+// User Schema
+const userSchema = new mongoose.Schema({
+  firebaseUid: { type: String, required: true, unique: true },
+  email: { type: String, required: true },
+  firstName: String,
+  lastName: String,
+  phoneNumber: String,
+  telegramUsername: String,
+  createdAt: { type: Date, default: Date.now },
+});
+
+const User = mongoose.model('User', userSchema);
+
 // Routes
 app.get('/', (req, res) => {
   res.send('CarEx Backend is running');
@@ -90,6 +103,54 @@ app.get('/api/cars', async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 });
+
+// --- User Routes ---
+
+// Create User (Called after Firebase Signup)
+app.post('/api/users', async (req, res) => {
+  try {
+    const { firebaseUid, email } = req.body;
+    // Check if exists
+    let user = await User.findOne({ firebaseUid });
+    if (!user) {
+      user = new User({ firebaseUid, email });
+      await user.save();
+    }
+    res.status(201).json(user);
+  } catch (error) {
+    console.error('Create User Error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Get User Profile
+app.get('/api/users/:uid', async (req, res) => {
+  try {
+    const user = await User.findOne({ firebaseUid: req.params.uid });
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    res.json(user);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Update User Profile
+app.put('/api/users/:uid', async (req, res) => {
+  try {
+    const { firstName, lastName, phoneNumber, telegramUsername } = req.body;
+    const user = await User.findOneAndUpdate(
+      { firebaseUid: req.params.uid },
+      { firstName, lastName, phoneNumber, telegramUsername },
+      { new: true } // Return updated doc
+    );
+    res.json(user);
+  } catch (error) {
+    console.error('Update User Error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// --- End User Routes ---
 
 // Upload and create car
 app.post('/api/cars', upload.array('images', 25), async (req, res) => {
