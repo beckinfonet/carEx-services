@@ -92,7 +92,7 @@ app.get('/api/cars', async (req, res) => {
 });
 
 // Upload and create car
-app.post('/api/cars', upload.array('images', 5), async (req, res) => {
+app.post('/api/cars', upload.array('images', 25), async (req, res) => {
   try {
     const {
       make, model, year, price, mileage, fuel, currency, description, bodyType,
