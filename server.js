@@ -166,7 +166,7 @@ app.post('/api/users/:uid/request-seller', async (req, res) => {
   try {
     const user = await User.findOneAndUpdate(
       { firebaseUid: req.params.uid },
-      {
+      { 
         sellerStatus: 'PENDING',
         sellerRequestDate: new Date()
       },
@@ -175,6 +175,18 @@ app.post('/api/users/:uid/request-seller', async (req, res) => {
     res.json(user);
   } catch (error) {
     console.error('Request Seller Error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Delete User
+app.delete('/api/users/:uid', async (req, res) => {
+  try {
+    const user = await User.findOneAndDelete({ firebaseUid: req.params.uid });
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    res.json({ message: 'User deleted successfully' });
+  } catch (error) {
+    console.error('Delete User Error:', error);
     res.status(500).json({ message: error.message });
   }
 });
