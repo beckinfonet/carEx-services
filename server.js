@@ -166,7 +166,7 @@ app.post('/api/users/:uid/request-seller', async (req, res) => {
   try {
     const user = await User.findOneAndUpdate(
       { firebaseUid: req.params.uid },
-      { 
+      {
         sellerStatus: 'PENDING',
         sellerRequestDate: new Date()
       },
@@ -211,7 +211,7 @@ app.post('/api/otp/send', async (req, res) => {
       { upsert: true, new: true }
     );
 
-    // In a real app, integrate Twilio/SNS here.
+    // In a real app, integrate Twilio/SNS here. #TODO
     // For now, log to console for testing/demo.
     console.log(`[OTP] Code for ${phoneNumber}: ${code}`);
 
