@@ -4,7 +4,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "seed-vehicles": "node seed-vehicle-catalog.js",
+    "seed-taxonomy": "node seed-vehicle-taxonomy.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
