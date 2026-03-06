@@ -75,6 +75,21 @@ const carSchema = new mongoose.Schema({
 
 const Car = mongoose.model('Car', carSchema);
 
+// Vehicle Make/Model Catalog (for search dropdown, no misspellings)
+const vehicleMakeSchema = new mongoose.Schema({
+  name: { type: String, required: true, unique: true },
+  nhtsaId: Number,
+}, { timestamps: true });
+
+const vehicleModelSchema = new mongoose.Schema({
+  makeId: { type: mongoose.Schema.Types.ObjectId, ref: 'VehicleMake', required: true },
+  name: { type: String, required: true },
+}, { timestamps: true });
+vehicleModelSchema.index({ makeId: 1, name: 1 }, { unique: true });
+
+const VehicleMake = mongoose.model('VehicleMake', vehicleMakeSchema);
+const VehicleModel = mongoose.model('VehicleModel', vehicleModelSchema);
+
 // User Schema
 const userSchema = new mongoose.Schema({
   firebaseUid: { type: String, required: true, unique: true },
@@ -102,6 +117,32 @@ const OTP = mongoose.model('OTP', otpSchema);
 // Routes
 app.get('/', (req, res) => {
   res.send('CarEx Backend is running');
+});
+
+// Get all vehicle makes (alphabetical)
+app.get('/api/vehicle-makes', async (req, res) => {
+  try {
+    const makes = await VehicleMake.find().sort({ name: 1 }).select('name');
+    res.json(makes.map(m => m.name));
+  } catch (error) {
+    console.error('Vehicle makes error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Get models for a make
+app.get('/api/vehicle-models', async (req, res) => {
+  try {
+    const { make } = req.query;
+    if (!make) return res.status(400).json({ message: 'make query required' });
+    const makeDoc = await VehicleMake.findOne({ name: { $regex: new RegExp(`^${String(make).trim()}$`, 'i') } });
+    if (!makeDoc) return res.json([]);
+    const models = await VehicleModel.find({ makeId: makeDoc._id }).sort({ name: 1 }).select('name');
+    res.json(models.map(m => m.name));
+  } catch (error) {
+    console.error('Vehicle models error:', error);
+    res.status(500).json({ message: error.message });
+  }
 });
 
 // Get all cars
