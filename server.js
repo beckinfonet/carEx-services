@@ -98,6 +98,7 @@ const carSchema = new mongoose.Schema({
   phoneNumber: String,
   telegramUsername: String,
   listingId: String,
+  sellerId: String, // Firebase UID of listing owner
 });
 
 const Car = mongoose.model('Car', carSchema);
@@ -176,6 +177,23 @@ app.get('/api/cars', async (req, res) => {
     res.json(mapped);
   } catch (error) {
     console.error('Fetch error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Get single car by id
+app.get('/api/cars/:id', async (req, res) => {
+  try {
+    const car = await Car.findById(req.params.id).lean();
+    if (!car) return res.status(404).json({ message: 'Car not found' });
+    res.json({
+      ...car,
+      id: car._id.toString(),
+      make: car.makeName || car.make || '',
+      model: car.modelName || car.model || '',
+    });
+  } catch (error) {
+    console.error('Fetch car error:', error);
     res.status(500).json({ message: error.message });
   }
 });
@@ -293,7 +311,7 @@ app.post('/api/cars', upload.array('images', 25), async (req, res) => {
     const {
       makeId, modelId, trimLevel, wheelbase, year, price, mileage, fuel, currency, description, bodyType,
       engine, transmission, drivetrain, mpg, condition, knownIssues,
-      exteriorColor, interiorColor, interiorMaterial, seats, doors, phoneNumber, telegramUsername
+      exteriorColor, interiorColor, interiorMaterial, seats, doors, phoneNumber, telegramUsername, sellerId
     } = req.body;
 
     // Validate makeId exists
@@ -360,6 +378,7 @@ app.post('/api/cars', upload.array('images', 25), async (req, res) => {
       phoneNumber,
       telegramUsername,
       listingId,
+      sellerId: sellerId || undefined,
     });
 
     await newCar.save();
@@ -371,6 +390,91 @@ app.post('/api/cars', upload.array('images', 25), async (req, res) => {
     });
   } catch (error) {
     console.error('Error creating car:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Update car (owner only)
+app.put('/api/cars/:id', upload.array('images', 25), async (req, res) => {
+  try {
+    const { sellerId, existingImageUrls } = req.body;
+    if (!sellerId) return res.status(400).json({ message: 'sellerId required to edit' });
+
+    const car = await Car.findById(req.params.id);
+    if (!car) return res.status(404).json({ message: 'Car not found' });
+    if (car.sellerId !== sellerId) return res.status(403).json({ message: 'Not authorized to edit this listing' });
+
+    const {
+      makeId, modelId, trimLevel, wheelbase, year, price, mileage, fuel, currency, description, bodyType,
+      engine, transmission, drivetrain, mpg, condition, knownIssues,
+      exteriorColor, interiorColor, interiorMaterial, seats, doors, phoneNumber, telegramUsername
+    } = req.body;
+
+    let imageUrls = car.imageUrls || [];
+    if (existingImageUrls) {
+      try {
+        imageUrls = JSON.parse(existingImageUrls);
+      } catch (e) {}
+    }
+    const newUrls = req.files ? req.files.map(f => f.location) : [];
+    imageUrls = [...imageUrls, ...newUrls];
+
+    if (makeId && modelId) {
+      const makeDoc = await VehicleMake.findOne({ _id: makeId, isActive: true });
+      if (!makeDoc) return res.status(400).json({ error: 'Invalid make' });
+      const modelDoc = await VehicleModel.findOne({ _id: modelId, makeId, isActive: true });
+      if (!modelDoc) return res.status(400).json({ error: 'Invalid model for selected make' });
+      car.makeId = makeDoc._id;
+      car.modelId = modelDoc._id;
+      car.makeName = makeDoc.name;
+      car.modelName = modelDoc.name;
+    }
+
+    let parsedKnownIssues = car.knownIssues || [];
+    if (knownIssues) {
+      try {
+        parsedKnownIssues = JSON.parse(knownIssues);
+      } catch (e) {
+        parsedKnownIssues = [knownIssues];
+      }
+    }
+
+    Object.assign(car, {
+      trimLevel: trimLevel ?? car.trimLevel,
+      wheelbase: wheelbase ?? car.wheelbase,
+      year: year ? parseInt(year) : car.year,
+      price: price ? parseInt(price) : car.price,
+      mileage: mileage ? parseInt(mileage) : car.mileage,
+      fuel: fuel ?? car.fuel,
+      currency: currency ?? car.currency,
+      description: description ?? car.description,
+      bodyType: bodyType ?? car.bodyType,
+      imageUrls,
+      engine: engine ?? car.engine,
+      transmission: transmission ?? car.transmission,
+      drivetrain: drivetrain ?? car.drivetrain,
+      mpg: mpg ?? car.mpg,
+      condition: condition ?? car.condition,
+      knownIssues: parsedKnownIssues,
+      exteriorColor: exteriorColor ?? car.exteriorColor,
+      interiorColor: interiorColor ?? car.interiorColor,
+      interiorMaterial: interiorMaterial ?? car.interiorMaterial,
+      seats: seats ? parseInt(seats) : car.seats,
+      doors: doors ? parseInt(doors) : car.doors,
+      phoneNumber: phoneNumber ?? car.phoneNumber,
+      telegramUsername: telegramUsername ?? car.telegramUsername,
+    });
+
+    await car.save();
+    const saved = car.toObject();
+    res.json({
+      ...saved,
+      id: saved._id.toString(),
+      make: saved.makeName,
+      model: saved.modelName,
+    });
+  } catch (error) {
+    console.error('Error updating car:', error);
     res.status(500).json({ message: error.message });
   }
 });
