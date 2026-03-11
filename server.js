@@ -99,6 +99,7 @@ const carSchema = new mongoose.Schema({
   telegramUsername: String,
   listingId: String,
   sellerId: String, // Firebase UID of listing owner
+  listingStatus: { type: String, enum: ['active', 'booked', 'sold'], default: 'active' },
 });
 
 const Car = mongoose.model('Car', carSchema);
@@ -137,9 +138,14 @@ app.get('/api/vehicles/makes', async (req, res) => {
   try {
     const makes = await VehicleMake.find({ isActive: true })
       .sort({ name: 1 })
-      .select('_id name')
+      .select('_id name slug logo')
       .lean();
-    res.json(makes.map(m => ({ id: m._id.toString(), name: m.name })));
+    res.json(makes.map(m => ({
+      id: m._id.toString(),
+      name: m.name,
+      slug: m.slug || null,
+      logo: m.logo || null,
+    })));
   } catch (error) {
     console.error('Vehicle makes error:', error);
     res.status(500).json({ message: error.message });
@@ -173,6 +179,7 @@ app.get('/api/cars', async (req, res) => {
       id: car._id.toString(),
       make: car.makeName || car.make || '',
       model: car.modelName || car.model || '',
+      listingStatus: car.listingStatus || 'active',
     }));
     res.json(mapped);
   } catch (error) {
@@ -191,9 +198,38 @@ app.get('/api/cars/:id', async (req, res) => {
       id: car._id.toString(),
       make: car.makeName || car.make || '',
       model: car.modelName || car.model || '',
+      listingStatus: car.listingStatus || 'active',
     });
   } catch (error) {
     console.error('Fetch car error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Update listing status (owner only)
+app.patch('/api/cars/:id/status', async (req, res) => {
+  try {
+    const { sellerId, listingStatus } = req.body;
+    if (!sellerId) return res.status(400).json({ message: 'sellerId required' });
+    if (!['active', 'booked', 'sold'].includes(listingStatus)) {
+      return res.status(400).json({ message: 'Invalid listingStatus' });
+    }
+
+    const car = await Car.findById(req.params.id);
+    if (!car) return res.status(404).json({ message: 'Car not found' });
+    if (car.sellerId !== sellerId) return res.status(403).json({ message: 'Not authorized' });
+
+    car.listingStatus = listingStatus;
+    await car.save();
+
+    res.json({
+      ...car.toObject(),
+      id: car._id.toString(),
+      make: car.makeName || car.make || '',
+      model: car.modelName || car.model || '',
+    });
+  } catch (error) {
+    console.error('Update status error:', error);
     res.status(500).json({ message: error.message });
   }
 });

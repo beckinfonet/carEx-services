@@ -60,7 +60,7 @@ const TAXONOMY = [
   { make: 'Jeep', models: ['CJ', 'Gladiator', 'Wrangler', 'Renegade', 'Avenger', 'Cherokee', 'Commander', 'Compass', 'Patriot'] },
   { make: 'Cadillac', models: ['ATS-V', 'ATS', 'CT4', 'CT5', 'CT5-V', 'CT6', 'CT6-V', 'CTS', 'CTS-V', 'SRX', 'STS', 'XT4', 'XT5', 'XT6', 'XTS', 'Lyric', 'Escalade'] },
   { make: 'Lincoln', models: ['MKC', 'MKS', 'MKT', 'MKX', 'MKZ', 'Navigator', 'Nautilus', 'Aviator', 'Continental', 'Corsair'] },
-  { make: 'Mazerati', models: ['Gran Cabrio', 'Gran Turismo', 'Ghibli', 'Grecale', 'Levante', 'Quattroporte', 'MC20'] },
+  { make: 'Maserati', models: ['Gran Cabrio', 'Gran Turismo', 'Ghibli', 'Grecale', 'Levante', 'Quattroporte', 'MC20'] },
   { make: 'Jaguar', models: ['E-PACE', 'E-TYPE', 'F-PACE', 'F-TYPE', 'I-PACE', 'S-TYPE', 'X-TYPE', 'XE', 'XF', 'XJ-6', 'XJ-8', 'XJ-C', 'XJR', 'XJS', 'XJ', 'XK', 'XK8', 'XKR'] },
   { make: 'Land Rover', models: ['Discovery Sport', 'Discovery', 'Defender', 'RangeRover Velar', 'RangeRover Sport', 'RangeRover Evoque', 'RangeRover', 'Freelander'] },
   { make: 'Ferrari', models: ['12Chilindri', '296', '308', '328', '348', '360', '456', '458', '488', '512 TR', '550', '575M', '599', '612', '812', '849', 'F12 Berlinetta', 'F355', 'F40', 'F430', 'F50', 'F8', 'FF', 'GTC4 Lusso', 'SF90', 'LaFerrari', 'Rome', 'Amalfi', 'Enzo Ferrari', 'California', 'Portofino', 'PurosanCrab'] },
@@ -73,6 +73,12 @@ const TAXONOMY = [
   { make: 'GMC', models: ['Ventura', 'Savannah', 'Safari', 'Sonoma', 'Sierra', 'Yukon', 'Jimmy', 'Canyon', 'Terrain', 'Hummer EV'] },
   { make: 'Subaru', models: ['BRZ', 'R1', 'SVX', 'Legacy', 'Levorg', 'Outback', 'Impreza', 'Forester'] },
   { make: 'BYD', models: ['E6', 'Ato 3', 'Sea Lion 7', 'Seal'] },
+  { make: 'Hyundai', models: ['Grandeur', 'SantaFe', 'Avante', 'Sonata', 'Palisade', 'Tucson', 'i30', 'Max Cruz', 'Venue', 'Veracruz', 'Veloster', 'Starex', 'Staria', 'Aslan', 'Ionic 5', 'Ionic 6', 'Ionic 9', 'Accent', 'Genesis', 'Casper', 'Kona', 'Porter'] },
+  { make: 'Genesis', models: ['EQ900', 'G70', 'G80', 'G90', 'GV60', 'GV70', 'GV80'] },
+  { make: 'Kia', models: ['Carnival', 'Sorento', 'Sportage', 'Morning', 'Ray', 'K3', 'K5', 'K7', 'K8', 'K9', 'EV3', 'EV4', 'EV5', 'EV6', 'EV9', 'Niro', 'Mohave', 'Seltos', 'Stonic', 'Stinger', 'Soul', 'Carens', 'Tasman', 'Forte', 'Pride', 'Bongo'] },
+  { make: 'Chevrolet', models: ['Spark', 'Trax', 'Malibu', 'Orlando', 'Cruz', 'Trailblazer', 'Damas', 'Bolt', 'Equinox', 'Impala', 'Camaro', 'Colorado', 'Traverse', 'Tahoe', 'Labo'] },
+  { make: 'Samsung', models: ['QM3', 'QM5', 'QM6', 'SM3', 'SM5', 'SM6', 'SM7', 'XM3', 'Grand Coleos', 'Master', 'Scenic', 'Joe', 'Capture', 'Clio', 'Twizy', 'Arcana'] },
+  { make: 'KG Mobility', models: ['Rexton', 'Tivolli', 'Korando', 'Torres', 'Chairman', 'Actyon', 'Musso'] },
 ];
 
 async function main() {
