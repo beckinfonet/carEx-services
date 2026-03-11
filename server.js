@@ -73,6 +73,8 @@ const carSchema = new mongoose.Schema({
   modelName: String,
   make: String,  // legacy, for old listings
   model: String, // legacy, for old listings
+  trimLevel: String,
+  wheelbase: String,
   year: Number,
   price: Number,
   mileage: Number,
@@ -289,7 +291,7 @@ app.post('/api/otp/verify', async (req, res) => {
 app.post('/api/cars', upload.array('images', 25), async (req, res) => {
   try {
     const {
-      makeId, modelId, year, price, mileage, fuel, currency, description, bodyType,
+      makeId, modelId, trimLevel, wheelbase, year, price, mileage, fuel, currency, description, bodyType,
       engine, transmission, drivetrain, mpg, condition, knownIssues,
       exteriorColor, interiorColor, interiorMaterial, seats, doors, phoneNumber, telegramUsername
     } = req.body;
@@ -334,6 +336,8 @@ app.post('/api/cars', upload.array('images', 25), async (req, res) => {
       modelId,
       makeName: makeDoc.name,
       modelName: modelDoc.name,
+      trimLevel: trimLevel || undefined,
+      wheelbase: wheelbase || undefined,
       year: year ? parseInt(year) : undefined,
       price: price ? parseInt(price) : undefined,
       mileage: mileage ? parseInt(mileage) : undefined,
