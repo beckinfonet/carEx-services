@@ -133,6 +133,45 @@ app.get('/', (req, res) => {
   res.send('CarEx Backend is running');
 });
 
+// --- Deep Link Verification (Universal Links / App Links) ---
+// Serve at /.well-known/ - required for https://www.carexmarket.com/listing/* to open the app
+// Ensure carexmarket.com proxies these paths to this backend, or deploy this app at carexmarket.com
+
+app.get('/.well-known/apple-app-site-association', (req, res) => {
+  res.type('application/json');
+  res.send(JSON.stringify({
+    applinks: {
+      apps: [],
+      details: [
+        {
+          appID: 'M3W6Y259JR.com.carex.app',
+          paths: ['/listing/*'],
+        },
+      ],
+    },
+  }));
+});
+
+app.get('/.well-known/assetlinks.json', (req, res) => {
+  const fingerprints = process.env.ANDROID_SHA256_CERT_FINGERPRINTS
+    ? process.env.ANDROID_SHA256_CERT_FINGERPRINTS.split(',').map((f) => f.trim())
+    : [];
+  if (fingerprints.length === 0) {
+    console.warn('ANDROID_SHA256_CERT_FINGERPRINTS not set - assetlinks.json will be empty. Add to .env for App Links.');
+  }
+  res.type('application/json');
+  res.send(JSON.stringify([
+    {
+      relation: ['delegate_permission/common.handle_all_urls'],
+      target: {
+        namespace: 'android_app',
+        package_name: 'com.carex.marketplace',
+        sha256_cert_fingerprints: fingerprints,
+      },
+    },
+  ]));
+});
+
 // Get vehicle makes (active only, alphabetical)
 app.get('/api/vehicles/makes', async (req, res) => {
   try {
