@@ -43,6 +43,20 @@ const upload = multer({
   }),
 });
 
+const uploadAvatar = multer({
+  storage: multerS3({
+    s3: s3,
+    bucket: process.env.AWS_BUCKET_NAME,
+    metadata: function (req, file, cb) {
+      cb(null, { fieldName: file.fieldname });
+    },
+    key: function (req, file, cb) {
+      const uid = req.params.uid || 'unknown';
+      cb(null, `avatars/${uid}-${Date.now().toString()}-${file.originalname || 'avatar.jpg'}`);
+    },
+  }),
+});
+
 // --- Vehicle Taxonomy Schemas ---
 const vehicleMakeSchema = new mongoose.Schema({
   name: { type: String, required: true },
@@ -112,6 +126,7 @@ const userSchema = new mongoose.Schema({
   lastName: String,
   phoneNumber: String,
   telegramUsername: String,
+  avatarUrl: String,
   sellerStatus: { type: String, enum: ['NONE', 'PENDING', 'APPROVED', 'REJECTED'], default: 'NONE' },
   sellerRequestDate: Date,
   isPhoneVerified: { type: Boolean, default: false },
@@ -310,15 +325,39 @@ app.get('/api/users/:uid', async (req, res) => {
 
 app.put('/api/users/:uid', async (req, res) => {
   try {
-    const { firstName, lastName, phoneNumber, telegramUsername } = req.body;
+    const { firstName, lastName, phoneNumber, telegramUsername, avatarUrl } = req.body;
+    const update = {};
+    if (firstName !== undefined) update.firstName = firstName;
+    if (lastName !== undefined) update.lastName = lastName;
+    if (phoneNumber !== undefined) update.phoneNumber = phoneNumber;
+    if (telegramUsername !== undefined) update.telegramUsername = telegramUsername;
+    if (avatarUrl !== undefined) update.avatarUrl = avatarUrl;
     const user = await User.findOneAndUpdate(
       { firebaseUid: req.params.uid },
-      { firstName, lastName, phoneNumber, telegramUsername },
+      update,
       { new: true }
     );
     res.json(user);
   } catch (error) {
     console.error('Update User Error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.post('/api/users/:uid/avatar', uploadAvatar.single('avatar'), async (req, res) => {
+  try {
+    const uid = req.params.uid;
+    const avatarUrl = req.file?.location;
+    if (!avatarUrl) return res.status(400).json({ message: 'No image uploaded' });
+    const user = await User.findOneAndUpdate(
+      { firebaseUid: uid },
+      { avatarUrl },
+      { new: true }
+    );
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    res.json(user);
+  } catch (error) {
+    console.error('Avatar upload error:', error);
     res.status(500).json({ message: error.message });
   }
 });
