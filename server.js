@@ -172,19 +172,28 @@ app.get('/.well-known/assetlinks.json', (req, res) => {
   ]));
 });
 
-// Get vehicle makes (active only, alphabetical)
+// Korean makes to show first in search (order preserved)
+const KOREAN_MAKES_PRIORITY = ['Hyundai', 'Genesis', 'Kia', 'Samsung', 'KG Mobility'];
+
+// Get vehicle makes (active only, Korean makes first, then alphabetical)
 app.get('/api/vehicles/makes', async (req, res) => {
   try {
     const makes = await VehicleMake.find({ isActive: true })
       .sort({ name: 1 })
       .select('_id name slug logo')
       .lean();
-    res.json(makes.map(m => ({
+    const mapped = makes.map(m => ({
       id: m._id.toString(),
       name: m.name,
       slug: m.slug || null,
       logo: m.logo || null,
-    })));
+    }));
+    // Korean makes first (in KOREAN_MAKES_PRIORITY order), then the rest alphabetically
+    const korean = KOREAN_MAKES_PRIORITY
+      .map(name => mapped.find(m => m.name === name))
+      .filter(Boolean);
+    const rest = mapped.filter(m => !KOREAN_MAKES_PRIORITY.includes(m.name));
+    res.json([...korean, ...rest]);
   } catch (error) {
     console.error('Vehicle makes error:', error);
     res.status(500).json({ message: error.message });
