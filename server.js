@@ -425,6 +425,7 @@ app.post('/api/otp/send', async (req, res) => {
 app.post('/api/otp/verify', async (req, res) => {
   try {
     const { phoneNumber, code, firebaseUid } = req.body;
+    console.log('[OTP verify] firebaseUid=', firebaseUid, 'phoneNumber=', phoneNumber);
     const record = await OTP.findOne({ phoneNumber });
     const isTestCode = code === '123456';
     if (!isTestCode && (!record || record.code !== code)) {
