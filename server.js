@@ -431,9 +431,14 @@ app.post('/api/otp/verify', async (req, res) => {
       return res.status(400).json({ message: 'Invalid or expired code' });
     }
     if (firebaseUid) {
+      const user = await User.findOne({ firebaseUid });
+      const updateData = { isPhoneVerified: true, phoneNumber };
+      if (!user?.sellerStatus || user.sellerStatus === 'PENDING') {
+        updateData.sellerStatus = 'APPROVED';
+      }
       await User.findOneAndUpdate(
         { firebaseUid },
-        { isPhoneVerified: true, phoneNumber }
+        updateData
       );
     }
     if (record) await OTP.deleteOne({ _id: record._id });
