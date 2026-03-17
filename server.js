@@ -233,10 +233,12 @@ app.get('/api/vehicles/models', async (req, res) => {
   }
 });
 
-// Get all cars (with make/model for display)
+// Get all cars (with make/model for display). Optional ?sellerId=xxx to filter by listing owner.
 app.get('/api/cars', async (req, res) => {
   try {
-    const cars = await Car.find().sort({ createdAt: -1 }).lean();
+    const { sellerId } = req.query;
+    const filter = sellerId ? { sellerId } : {};
+    const cars = await Car.find(filter).sort({ createdAt: -1 }).lean();
     const mapped = cars.map(car => ({
       ...car,
       id: car._id.toString(),
