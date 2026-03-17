@@ -8,6 +8,25 @@ const multerS3 = require('multer-s3');
 
 dotenv.config();
 
+// Firebase Admin (optional - for phone verification custom tokens)
+let firebaseAdmin = null;
+if (process.env.GOOGLE_APPLICATION_CREDENTIALS || process.env.FIREBASE_SERVICE_ACCOUNT) {
+  try {
+    firebaseAdmin = require('firebase-admin');
+    if (!firebaseAdmin.apps.length) {
+      if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+        const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+        firebaseAdmin.initializeApp({ credential: firebaseAdmin.credential.cert(serviceAccount) });
+      } else {
+        firebaseAdmin.initializeApp();
+      }
+      console.log('Firebase Admin initialized');
+    }
+  } catch (e) {
+    console.warn('Firebase Admin init failed:', e.message);
+  }
+}
+
 const app = express();
 const PORT = process.env.PORT || 5001;
 
@@ -383,6 +402,46 @@ app.delete('/api/users/:uid', async (req, res) => {
     res.json({ message: 'User deleted successfully' });
   } catch (error) {
     console.error('Delete User Error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Custom token for Firebase phone auth (client signs in to Firebase for linkWithCredential)
+app.get('/api/users/:uid/custom-token', async (req, res) => {
+  try {
+    if (!firebaseAdmin?.auth) {
+      return res.status(503).json({ message: 'Firebase Admin not configured' });
+    }
+    const { uid } = req.params;
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+      return res.status(401).json({ message: 'Authorization required' });
+    }
+    const idToken = authHeader.slice(7);
+    const decoded = await firebaseAdmin.auth().verifyIdToken(idToken);
+    if (decoded.uid !== uid) {
+      return res.status(403).json({ message: 'Token does not match user' });
+    }
+    const customToken = await firebaseAdmin.auth().createCustomToken(uid);
+    res.json({ customToken });
+  } catch (error) {
+    console.error('Custom token error:', error);
+    res.status(401).json({ message: 'Invalid or expired token' });
+  }
+});
+
+// Mark phone as verified (called after successful Firebase linkWithCredential)
+app.post('/api/users/:uid/phone-verified', async (req, res) => {
+  try {
+    const user = await User.findOneAndUpdate(
+      { firebaseUid: req.params.uid },
+      { isPhoneVerified: true },
+      { new: true }
+    );
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    res.json(user);
+  } catch (error) {
+    console.error('Phone verified error:', error);
     res.status(500).json({ message: error.message });
   }
 });
