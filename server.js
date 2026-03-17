@@ -8,25 +8,6 @@ const multerS3 = require('multer-s3');
 
 dotenv.config();
 
-// Firebase Admin (optional - for phone verification custom tokens)
-let firebaseAdmin = null;
-if (process.env.GOOGLE_APPLICATION_CREDENTIALS || process.env.FIREBASE_SERVICE_ACCOUNT) {
-  try {
-    firebaseAdmin = require('firebase-admin');
-    if (!firebaseAdmin.apps.length) {
-      if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-        const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-        firebaseAdmin.initializeApp({ credential: firebaseAdmin.credential.cert(serviceAccount) });
-      } else {
-        firebaseAdmin.initializeApp();
-      }
-      console.log('Firebase Admin initialized');
-    }
-  } catch (e) {
-    console.warn('Firebase Admin init failed:', e.message);
-  }
-}
-
 const app = express();
 const PORT = process.env.PORT || 5001;
 
@@ -406,47 +387,8 @@ app.delete('/api/users/:uid', async (req, res) => {
   }
 });
 
-// Custom token for Firebase phone auth (client signs in to Firebase for linkWithCredential)
-app.get('/api/users/:uid/custom-token', async (req, res) => {
-  try {
-    if (!firebaseAdmin?.auth) {
-      return res.status(503).json({ message: 'Firebase Admin not configured' });
-    }
-    const { uid } = req.params;
-    const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith('Bearer ')) {
-      return res.status(401).json({ message: 'Authorization required' });
-    }
-    const idToken = authHeader.slice(7);
-    const decoded = await firebaseAdmin.auth().verifyIdToken(idToken);
-    if (decoded.uid !== uid) {
-      return res.status(403).json({ message: 'Token does not match user' });
-    }
-    const customToken = await firebaseAdmin.auth().createCustomToken(uid);
-    res.json({ customToken });
-  } catch (error) {
-    console.error('Custom token error:', error);
-    res.status(401).json({ message: 'Invalid or expired token' });
-  }
-});
-
-// Mark phone as verified (called after successful Firebase linkWithCredential)
-app.post('/api/users/:uid/phone-verified', async (req, res) => {
-  try {
-    const user = await User.findOneAndUpdate(
-      { firebaseUid: req.params.uid },
-      { isPhoneVerified: true },
-      { new: true }
-    );
-    if (!user) return res.status(404).json({ message: 'User not found' });
-    res.json(user);
-  } catch (error) {
-    console.error('Phone verified error:', error);
-    res.status(500).json({ message: error.message });
-  }
-});
-
 // --- OTP Routes ---
+// Sends verification code via Twilio SMS (if configured) or logs to console for dev
 app.post('/api/otp/send', async (req, res) => {
   try {
     const { phoneNumber } = req.body;
@@ -457,7 +399,22 @@ app.post('/api/otp/send', async (req, res) => {
       { code, createdAt: new Date() },
       { upsert: true, new: true }
     );
-    console.log(`[OTP] Code for ${phoneNumber}: ${code}`);
+    // Send SMS via Twilio if configured
+    if (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_PHONE_NUMBER) {
+      try {
+        const twilio = require('twilio')(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+        await twilio.messages.create({
+          body: `Your CarEx verification code is: ${code}`,
+          from: process.env.TWILIO_PHONE_NUMBER,
+          to: phoneNumber,
+        });
+      } catch (twilioErr) {
+        console.error('[OTP] Twilio send failed:', twilioErr.message);
+        console.log(`[OTP] Code for ${phoneNumber}: ${code}`);
+      }
+    } else {
+      console.log(`[OTP] Code for ${phoneNumber}: ${code} (Twilio not configured - add to .env for real SMS)`);
+    }
     res.json({ message: 'OTP sent' });
   } catch (error) {
     console.error('Send OTP Error:', error);
