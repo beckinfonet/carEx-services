@@ -139,6 +139,13 @@ const userSchema = new mongoose.Schema({
 
 const User = mongoose.model('User', userSchema);
 
+// Service item sub-schema (shared by broker and logistics)
+const serviceItemSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  fee: { type: Number, default: 0 },
+  currency: { type: String, default: '$' },
+}, { _id: false });
+
 // Broker Schema
 const brokerSchema = new mongoose.Schema({
   ownerUid: { type: String, required: true, unique: true },
@@ -146,7 +153,7 @@ const brokerSchema = new mongoose.Schema({
   description: String,
   phoneNumber: String,
   telegramUsername: String,
-  services: [String],
+  services: [serviceItemSchema],
   paymentOptions: [String],
   avatarUrl: String,
   status: { type: String, enum: ['active', 'inactive'], default: 'active' },
@@ -163,6 +170,7 @@ const logisticsPartnerSchema = new mongoose.Schema({
   description: String,
   phoneNumber: String,
   telegramUsername: String,
+  services: [serviceItemSchema],
   coverageAreas: [String],
   timelines: String,
   paymentOptions: [String],
@@ -466,6 +474,40 @@ app.get('/api/brokers', async (req, res) => {
   }
 });
 
+app.get('/api/brokers/:uid', async (req, res) => {
+  try {
+    const broker = await Broker.findOne({ ownerUid: req.params.uid }).lean();
+    if (!broker) return res.status(404).json({ message: 'Broker profile not found' });
+    res.json({ ...broker, id: broker._id.toString() });
+  } catch (error) {
+    console.error('Fetch broker error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.put('/api/brokers/:uid', async (req, res) => {
+  try {
+    const { companyName, description, phoneNumber, telegramUsername, services, paymentOptions } = req.body;
+    const update = {};
+    if (companyName !== undefined) update.companyName = companyName;
+    if (description !== undefined) update.description = description;
+    if (phoneNumber !== undefined) update.phoneNumber = phoneNumber;
+    if (telegramUsername !== undefined) update.telegramUsername = telegramUsername;
+    if (services !== undefined) update.services = services;
+    if (paymentOptions !== undefined) update.paymentOptions = paymentOptions;
+    const broker = await Broker.findOneAndUpdate(
+      { ownerUid: req.params.uid },
+      update,
+      { new: true }
+    );
+    if (!broker) return res.status(404).json({ message: 'Broker profile not found' });
+    res.json({ ...broker.toObject(), id: broker._id.toString() });
+  } catch (error) {
+    console.error('Update broker error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
 // --- Logistics Partner Routes ---
 app.get('/api/logistics', async (req, res) => {
   try {
@@ -483,6 +525,42 @@ app.get('/api/logistics', async (req, res) => {
     res.json(enriched);
   } catch (error) {
     console.error('Fetch logistics partners error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.get('/api/logistics/:uid', async (req, res) => {
+  try {
+    const partner = await LogisticsPartner.findOne({ ownerUid: req.params.uid }).lean();
+    if (!partner) return res.status(404).json({ message: 'Logistics profile not found' });
+    res.json({ ...partner, id: partner._id.toString() });
+  } catch (error) {
+    console.error('Fetch logistics partner error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.put('/api/logistics/:uid', async (req, res) => {
+  try {
+    const { companyName, description, phoneNumber, telegramUsername, services, coverageAreas, timelines, paymentOptions } = req.body;
+    const update = {};
+    if (companyName !== undefined) update.companyName = companyName;
+    if (description !== undefined) update.description = description;
+    if (phoneNumber !== undefined) update.phoneNumber = phoneNumber;
+    if (telegramUsername !== undefined) update.telegramUsername = telegramUsername;
+    if (services !== undefined) update.services = services;
+    if (coverageAreas !== undefined) update.coverageAreas = coverageAreas;
+    if (timelines !== undefined) update.timelines = timelines;
+    if (paymentOptions !== undefined) update.paymentOptions = paymentOptions;
+    const partner = await LogisticsPartner.findOneAndUpdate(
+      { ownerUid: req.params.uid },
+      update,
+      { new: true }
+    );
+    if (!partner) return res.status(404).json({ message: 'Logistics profile not found' });
+    res.json({ ...partner.toObject(), id: partner._id.toString() });
+  } catch (error) {
+    console.error('Update logistics partner error:', error);
     res.status(500).json({ message: error.message });
   }
 });
