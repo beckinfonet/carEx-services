@@ -142,6 +142,7 @@ const User = mongoose.model('User', userSchema);
 // Service item sub-schema (shared by broker and logistics)
 const serviceItemSchema = new mongoose.Schema({
   name: { type: String, required: true },
+  description: { type: String, default: '' },
   fee: { type: Number, default: 0 },
   currency: { type: String, default: '$' },
 }, { _id: false });
