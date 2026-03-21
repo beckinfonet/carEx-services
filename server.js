@@ -545,7 +545,7 @@ app.post('/api/otp/verify', async (req, res) => {
     if (firebaseUid) {
       const user = await User.findOne({ firebaseUid });
       const updateData = { isPhoneVerified: true, phoneNumber };
-      if (!user?.sellerStatus || user.sellerStatus === 'PENDING') {
+      if (!user?.sellerStatus || user.sellerStatus === 'NONE' || user.sellerStatus === 'PENDING') {
         updateData.sellerStatus = 'APPROVED';
       }
       if (user?.brokerStatus === 'PENDING') {
