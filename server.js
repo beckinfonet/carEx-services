@@ -495,12 +495,12 @@ app.put('/api/brokers/:uid', async (req, res) => {
     if (telegramUsername !== undefined) update.telegramUsername = telegramUsername;
     if (services !== undefined) update.services = services;
     if (paymentOptions !== undefined) update.paymentOptions = paymentOptions;
+    update.ownerUid = req.params.uid;
     const broker = await Broker.findOneAndUpdate(
       { ownerUid: req.params.uid },
       update,
-      { new: true }
+      { new: true, upsert: true }
     );
-    if (!broker) return res.status(404).json({ message: 'Broker profile not found' });
     res.json({ ...broker.toObject(), id: broker._id.toString() });
   } catch (error) {
     console.error('Update broker error:', error);
@@ -552,12 +552,12 @@ app.put('/api/logistics/:uid', async (req, res) => {
     if (coverageAreas !== undefined) update.coverageAreas = coverageAreas;
     if (timelines !== undefined) update.timelines = timelines;
     if (paymentOptions !== undefined) update.paymentOptions = paymentOptions;
+    update.ownerUid = req.params.uid;
     const partner = await LogisticsPartner.findOneAndUpdate(
       { ownerUid: req.params.uid },
       update,
-      { new: true }
+      { new: true, upsert: true }
     );
-    if (!partner) return res.status(404).json({ message: 'Logistics profile not found' });
     res.json({ ...partner.toObject(), id: partner._id.toString() });
   } catch (error) {
     console.error('Update logistics partner error:', error);
