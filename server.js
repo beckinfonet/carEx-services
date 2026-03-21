@@ -129,11 +129,50 @@ const userSchema = new mongoose.Schema({
   avatarUrl: String,
   sellerStatus: { type: String, enum: ['NONE', 'PENDING', 'APPROVED', 'REJECTED'], default: 'NONE' },
   sellerRequestDate: Date,
+  brokerStatus: { type: String, enum: ['NONE', 'PENDING', 'APPROVED', 'REJECTED'], default: 'NONE' },
+  brokerRequestDate: Date,
+  logisticsStatus: { type: String, enum: ['NONE', 'PENDING', 'APPROVED', 'REJECTED'], default: 'NONE' },
+  logisticsRequestDate: Date,
   isPhoneVerified: { type: Boolean, default: false },
   createdAt: { type: Date, default: Date.now },
 });
 
 const User = mongoose.model('User', userSchema);
+
+// Broker Schema
+const brokerSchema = new mongoose.Schema({
+  ownerUid: { type: String, required: true, unique: true },
+  companyName: { type: String, required: true },
+  description: String,
+  phoneNumber: String,
+  telegramUsername: String,
+  services: [String],
+  paymentOptions: [String],
+  avatarUrl: String,
+  status: { type: String, enum: ['active', 'inactive'], default: 'active' },
+  createdAt: { type: Date, default: Date.now },
+});
+brokerSchema.index({ ownerUid: 1 }, { unique: true });
+
+const Broker = mongoose.model('Broker', brokerSchema, 'brokers');
+
+// Logistics Partner Schema
+const logisticsPartnerSchema = new mongoose.Schema({
+  ownerUid: { type: String, required: true, unique: true },
+  companyName: { type: String, required: true },
+  description: String,
+  phoneNumber: String,
+  telegramUsername: String,
+  coverageAreas: [String],
+  timelines: String,
+  paymentOptions: [String],
+  avatarUrl: String,
+  status: { type: String, enum: ['active', 'inactive'], default: 'active' },
+  createdAt: { type: Date, default: Date.now },
+});
+logisticsPartnerSchema.index({ ownerUid: 1 }, { unique: true });
+
+const LogisticsPartner = mongoose.model('LogisticsPartner', logisticsPartnerSchema, 'logistics_partners');
 
 // OTP Schema
 const otpSchema = new mongoose.Schema({
@@ -378,6 +417,76 @@ app.post('/api/users/:uid/request-seller', async (req, res) => {
   }
 });
 
+app.post('/api/users/:uid/request-broker', async (req, res) => {
+  try {
+    const user = await User.findOneAndUpdate(
+      { firebaseUid: req.params.uid },
+      { brokerStatus: 'PENDING', brokerRequestDate: new Date() },
+      { new: true }
+    );
+    res.json(user);
+  } catch (error) {
+    console.error('Request Broker Error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.post('/api/users/:uid/request-logistics', async (req, res) => {
+  try {
+    const user = await User.findOneAndUpdate(
+      { firebaseUid: req.params.uid },
+      { logisticsStatus: 'PENDING', logisticsRequestDate: new Date() },
+      { new: true }
+    );
+    res.json(user);
+  } catch (error) {
+    console.error('Request Logistics Error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// --- Broker Routes ---
+app.get('/api/brokers', async (req, res) => {
+  try {
+    const brokers = await Broker.find({ status: 'active' }).sort({ createdAt: -1 }).lean();
+    const enriched = await Promise.all(brokers.map(async (b) => {
+      const user = await User.findOne({ firebaseUid: b.ownerUid }).select('firstName lastName avatarUrl email').lean();
+      return {
+        ...b,
+        id: b._id.toString(),
+        ownerName: user ? `${user.firstName || ''} ${user.lastName || ''}`.trim() : '',
+        ownerAvatarUrl: user?.avatarUrl || null,
+        ownerEmail: user?.email || null,
+      };
+    }));
+    res.json(enriched);
+  } catch (error) {
+    console.error('Fetch brokers error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// --- Logistics Partner Routes ---
+app.get('/api/logistics', async (req, res) => {
+  try {
+    const partners = await LogisticsPartner.find({ status: 'active' }).sort({ createdAt: -1 }).lean();
+    const enriched = await Promise.all(partners.map(async (p) => {
+      const user = await User.findOne({ firebaseUid: p.ownerUid }).select('firstName lastName avatarUrl email').lean();
+      return {
+        ...p,
+        id: p._id.toString(),
+        ownerName: user ? `${user.firstName || ''} ${user.lastName || ''}`.trim() : '',
+        ownerAvatarUrl: user?.avatarUrl || null,
+        ownerEmail: user?.email || null,
+      };
+    }));
+    res.json(enriched);
+  } catch (error) {
+    console.error('Fetch logistics partners error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
 app.delete('/api/users/:uid', async (req, res) => {
   try {
     const user = await User.findOneAndDelete({ firebaseUid: req.params.uid });
@@ -439,10 +548,32 @@ app.post('/api/otp/verify', async (req, res) => {
       if (!user?.sellerStatus || user.sellerStatus === 'PENDING') {
         updateData.sellerStatus = 'APPROVED';
       }
+      if (user?.brokerStatus === 'PENDING') {
+        updateData.brokerStatus = 'APPROVED';
+      }
+      if (user?.logisticsStatus === 'PENDING') {
+        updateData.logisticsStatus = 'APPROVED';
+      }
       await User.findOneAndUpdate(
         { firebaseUid },
         updateData
       );
+
+      // Create broker/logistics profiles on approval
+      if (updateData.brokerStatus === 'APPROVED') {
+        await Broker.findOneAndUpdate(
+          { ownerUid: firebaseUid },
+          { ownerUid: firebaseUid, companyName: `${user.firstName || ''} ${user.lastName || ''}`.trim() || 'Broker', phoneNumber: user.phoneNumber, telegramUsername: user.telegramUsername },
+          { upsert: true, new: true }
+        );
+      }
+      if (updateData.logisticsStatus === 'APPROVED') {
+        await LogisticsPartner.findOneAndUpdate(
+          { ownerUid: firebaseUid },
+          { ownerUid: firebaseUid, companyName: `${user.firstName || ''} ${user.lastName || ''}`.trim() || 'Logistics Partner', phoneNumber: user.phoneNumber, telegramUsername: user.telegramUsername },
+          { upsert: true, new: true }
+        );
+      }
     }
     if (record) await OTP.deleteOne({ _id: record._id });
     res.json({ message: 'Phone verified successfully' });
