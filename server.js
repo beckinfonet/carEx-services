@@ -17,7 +17,10 @@ app.use(express.json());
 
 // MongoDB Connection
 mongoose.connect(process.env.MONGODB_URI, { dbName: 'CarEx' })
-  .then(() => console.log('Connected to MongoDB'))
+  .then(async () => {
+    console.log('Connected to MongoDB');
+    await seedSuperAdmin();
+  })
   .catch((err) => console.error('MongoDB connection error:', err));
 
 // AWS S3 Configuration
@@ -190,6 +193,62 @@ const otpSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now, expires: 300 }
 });
 const OTP = mongoose.model('OTP', otpSchema);
+
+// Admin User Schema
+const adminUserSchema = new mongoose.Schema({
+  email: { type: String, required: true, unique: true },
+  role: { type: String, enum: ['superadmin', 'admin'], default: 'admin' },
+  createdAt: { type: Date, default: Date.now },
+});
+adminUserSchema.index({ email: 1 }, { unique: true });
+const AdminUser = mongoose.model('AdminUser', adminUserSchema, 'admin_users');
+
+const seedSuperAdmin = async () => {
+  const email = process.env.SUPER_ADMIN_EMAIL;
+  if (!email) {
+    console.log('[Admin] SUPER_ADMIN_EMAIL not set in .env — skipping super admin seed');
+    return;
+  }
+  await AdminUser.findOneAndUpdate(
+    { email: email.toLowerCase() },
+    { email: email.toLowerCase(), role: 'superadmin' },
+    { upsert: true }
+  );
+  console.log(`[Admin] Super admin seeded: ${email}`);
+};
+
+const verifyAdminByUid = async (uid) => {
+  const user = await User.findOne({ firebaseUid: uid }).lean();
+  if (!user) return null;
+  const admin = await AdminUser.findOne({ email: user.email.toLowerCase() }).lean();
+  return admin;
+};
+
+const notifyAdminsOfRequest = async (requestingUser, requestType) => {
+  if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN || !process.env.TWILIO_PHONE_NUMBER) {
+    console.log(`[Admin SMS] Twilio not configured — skipping notification for ${requestType} request from ${requestingUser.email}`);
+    return;
+  }
+  try {
+    const adminEntries = await AdminUser.find({}).lean();
+    const adminEmails = adminEntries.map(a => a.email);
+    const adminUsers = await User.find({ email: { $in: adminEmails }, isPhoneVerified: true }).select('phoneNumber email').lean();
+    const twilio = require('twilio')(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+    const userName = `${requestingUser.firstName || ''} ${requestingUser.lastName || ''}`.trim() || requestingUser.email;
+    const msg = `[CarEx] New ${requestType} request from ${userName}. Open the app to review.`;
+    for (const admin of adminUsers) {
+      if (admin.phoneNumber) {
+        try {
+          await twilio.messages.create({ body: msg, from: process.env.TWILIO_PHONE_NUMBER, to: admin.phoneNumber });
+        } catch (e) {
+          console.error(`[Admin SMS] Failed to notify ${admin.email}:`, e.message);
+        }
+      }
+    }
+  } catch (e) {
+    console.error('[Admin SMS] Notification error:', e.message);
+  }
+};
 
 // --- Routes ---
 app.get('/', (req, res) => {
@@ -419,6 +478,7 @@ app.post('/api/users/:uid/request-seller', async (req, res) => {
       { sellerStatus: 'PENDING', sellerRequestDate: new Date() },
       { new: true }
     );
+    notifyAdminsOfRequest(user, 'seller');
     res.json(user);
   } catch (error) {
     console.error('Request Seller Error:', error);
@@ -433,6 +493,7 @@ app.post('/api/users/:uid/request-broker', async (req, res) => {
       { brokerStatus: 'PENDING', brokerRequestDate: new Date() },
       { new: true }
     );
+    notifyAdminsOfRequest(user, 'broker');
     res.json(user);
   } catch (error) {
     console.error('Request Broker Error:', error);
@@ -447,6 +508,7 @@ app.post('/api/users/:uid/request-logistics', async (req, res) => {
       { logisticsStatus: 'PENDING', logisticsRequestDate: new Date() },
       { new: true }
     );
+    notifyAdminsOfRequest(user, 'logistics');
     res.json(user);
   } catch (error) {
     console.error('Request Logistics Error:', error);
@@ -622,37 +684,10 @@ app.post('/api/otp/verify', async (req, res) => {
       return res.status(400).json({ message: 'Invalid or expired code' });
     }
     if (firebaseUid) {
-      const user = await User.findOne({ firebaseUid });
-      const updateData = { isPhoneVerified: true, phoneNumber };
-      if (!user?.sellerStatus || user.sellerStatus === 'NONE' || user.sellerStatus === 'PENDING') {
-        updateData.sellerStatus = 'APPROVED';
-      }
-      if (user?.brokerStatus === 'PENDING') {
-        updateData.brokerStatus = 'APPROVED';
-      }
-      if (user?.logisticsStatus === 'PENDING') {
-        updateData.logisticsStatus = 'APPROVED';
-      }
       await User.findOneAndUpdate(
         { firebaseUid },
-        updateData
+        { isPhoneVerified: true, phoneNumber }
       );
-
-      // Create broker/logistics profiles on approval
-      if (updateData.brokerStatus === 'APPROVED') {
-        await Broker.findOneAndUpdate(
-          { ownerUid: firebaseUid },
-          { ownerUid: firebaseUid, companyName: `${user.firstName || ''} ${user.lastName || ''}`.trim() || 'Broker', phoneNumber: user.phoneNumber, telegramUsername: user.telegramUsername },
-          { upsert: true, new: true }
-        );
-      }
-      if (updateData.logisticsStatus === 'APPROVED') {
-        await LogisticsPartner.findOneAndUpdate(
-          { ownerUid: firebaseUid },
-          { ownerUid: firebaseUid, companyName: `${user.firstName || ''} ${user.lastName || ''}`.trim() || 'Logistics Partner', phoneNumber: user.phoneNumber, telegramUsername: user.telegramUsername },
-          { upsert: true, new: true }
-        );
-      }
     }
     if (record) await OTP.deleteOne({ _id: record._id });
     res.json({ message: 'Phone verified successfully' });
@@ -832,6 +867,165 @@ app.put('/api/cars/:id', upload.array('images', 25), async (req, res) => {
     });
   } catch (error) {
     console.error('Error updating car:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// --- Admin Routes ---
+
+// Check if current user is an admin
+app.get('/api/admin/status/:uid', async (req, res) => {
+  try {
+    const admin = await verifyAdminByUid(req.params.uid);
+    if (!admin) return res.json({ isAdmin: false });
+    res.json({ isAdmin: true, role: admin.role });
+  } catch (error) {
+    console.error('Admin status check error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Get all pending requests (admin only)
+app.get('/api/admin/requests', async (req, res) => {
+  try {
+    const { uid } = req.query;
+    if (!uid) return res.status(400).json({ message: 'uid query param required' });
+    const admin = await verifyAdminByUid(uid);
+    if (!admin) return res.status(403).json({ message: 'Unauthorized' });
+
+    const pendingSellers = await User.find({ sellerStatus: 'PENDING' }).select('firebaseUid email firstName lastName phoneNumber telegramUsername avatarUrl sellerRequestDate isPhoneVerified createdAt').lean();
+    const pendingBrokers = await User.find({ brokerStatus: 'PENDING' }).select('firebaseUid email firstName lastName phoneNumber telegramUsername avatarUrl brokerRequestDate isPhoneVerified createdAt').lean();
+    const pendingLogistics = await User.find({ logisticsStatus: 'PENDING' }).select('firebaseUid email firstName lastName phoneNumber telegramUsername avatarUrl logisticsRequestDate isPhoneVerified createdAt').lean();
+
+    res.json({
+      sellers: pendingSellers.map(u => ({ ...u, id: u._id?.toString(), requestType: 'seller', requestDate: u.sellerRequestDate })),
+      brokers: pendingBrokers.map(u => ({ ...u, id: u._id?.toString(), requestType: 'broker', requestDate: u.brokerRequestDate })),
+      logistics: pendingLogistics.map(u => ({ ...u, id: u._id?.toString(), requestType: 'logistics', requestDate: u.logisticsRequestDate })),
+    });
+  } catch (error) {
+    console.error('Fetch pending requests error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Approve a request (admin only)
+app.post('/api/admin/requests/:uid/approve', async (req, res) => {
+  try {
+    const { callerUid, type } = req.body;
+    if (!callerUid || !type) return res.status(400).json({ message: 'callerUid and type required' });
+    const admin = await verifyAdminByUid(callerUid);
+    if (!admin) return res.status(403).json({ message: 'Unauthorized' });
+
+    const validTypes = ['seller', 'broker', 'logistics'];
+    if (!validTypes.includes(type)) return res.status(400).json({ message: 'Invalid type' });
+
+    const statusField = `${type}Status`;
+    const user = await User.findOneAndUpdate(
+      { firebaseUid: req.params.uid, [statusField]: 'PENDING' },
+      { [statusField]: 'APPROVED' },
+      { new: true }
+    );
+    if (!user) return res.status(404).json({ message: 'User not found or not pending' });
+
+    if (type === 'broker') {
+      await Broker.findOneAndUpdate(
+        { ownerUid: req.params.uid },
+        { ownerUid: req.params.uid, companyName: `${user.firstName || ''} ${user.lastName || ''}`.trim() || 'Broker', phoneNumber: user.phoneNumber, telegramUsername: user.telegramUsername },
+        { upsert: true, new: true }
+      );
+    }
+    if (type === 'logistics') {
+      await LogisticsPartner.findOneAndUpdate(
+        { ownerUid: req.params.uid },
+        { ownerUid: req.params.uid, companyName: `${user.firstName || ''} ${user.lastName || ''}`.trim() || 'Logistics Partner', phoneNumber: user.phoneNumber, telegramUsername: user.telegramUsername },
+        { upsert: true, new: true }
+      );
+    }
+
+    res.json({ message: `${type} request approved`, user });
+  } catch (error) {
+    console.error('Approve request error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Reject a request (admin only)
+app.post('/api/admin/requests/:uid/reject', async (req, res) => {
+  try {
+    const { callerUid, type } = req.body;
+    if (!callerUid || !type) return res.status(400).json({ message: 'callerUid and type required' });
+    const admin = await verifyAdminByUid(callerUid);
+    if (!admin) return res.status(403).json({ message: 'Unauthorized' });
+
+    const validTypes = ['seller', 'broker', 'logistics'];
+    if (!validTypes.includes(type)) return res.status(400).json({ message: 'Invalid type' });
+
+    const statusField = `${type}Status`;
+    const user = await User.findOneAndUpdate(
+      { firebaseUid: req.params.uid, [statusField]: 'PENDING' },
+      { [statusField]: 'REJECTED' },
+      { new: true }
+    );
+    if (!user) return res.status(404).json({ message: 'User not found or not pending' });
+
+    res.json({ message: `${type} request rejected`, user });
+  } catch (error) {
+    console.error('Reject request error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// List admin accounts (superadmin only)
+app.get('/api/admin/users', async (req, res) => {
+  try {
+    const { uid } = req.query;
+    if (!uid) return res.status(400).json({ message: 'uid query param required' });
+    const admin = await verifyAdminByUid(uid);
+    if (!admin || admin.role !== 'superadmin') return res.status(403).json({ message: 'Superadmin only' });
+
+    const admins = await AdminUser.find({}).sort({ createdAt: -1 }).lean();
+    res.json(admins.map(a => ({ ...a, id: a._id.toString() })));
+  } catch (error) {
+    console.error('List admins error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Add admin account (superadmin only)
+app.post('/api/admin/users', async (req, res) => {
+  try {
+    const { callerUid, email } = req.body;
+    if (!callerUid || !email) return res.status(400).json({ message: 'callerUid and email required' });
+    const admin = await verifyAdminByUid(callerUid);
+    if (!admin || admin.role !== 'superadmin') return res.status(403).json({ message: 'Superadmin only' });
+
+    const existing = await AdminUser.findOne({ email: email.toLowerCase() });
+    if (existing) return res.status(409).json({ message: 'Admin already exists' });
+
+    const newAdmin = await AdminUser.create({ email: email.toLowerCase(), role: 'admin' });
+    res.status(201).json({ ...newAdmin.toObject(), id: newAdmin._id.toString() });
+  } catch (error) {
+    console.error('Add admin error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Remove admin account (superadmin only, cannot remove self)
+app.delete('/api/admin/users/:adminId', async (req, res) => {
+  try {
+    const { uid } = req.query;
+    if (!uid) return res.status(400).json({ message: 'uid query param required' });
+    const admin = await verifyAdminByUid(uid);
+    if (!admin || admin.role !== 'superadmin') return res.status(403).json({ message: 'Superadmin only' });
+
+    const target = await AdminUser.findById(req.params.adminId);
+    if (!target) return res.status(404).json({ message: 'Admin not found' });
+    if (target.role === 'superadmin') return res.status(400).json({ message: 'Cannot remove super admin' });
+
+    await AdminUser.deleteOne({ _id: req.params.adminId });
+    res.json({ message: 'Admin removed' });
+  } catch (error) {
+    console.error('Remove admin error:', error);
     res.status(500).json({ message: error.message });
   }
 });
