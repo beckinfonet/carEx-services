@@ -143,7 +143,7 @@ const User = mongoose.model('User', userSchema);
 const serviceItemSchema = new mongoose.Schema({
   name: { type: String, required: true },
   description: { type: String, default: '' },
-  fee: { type: Number, default: 0 },
+  fee: { type: mongoose.Schema.Types.Mixed, default: 0 },
   currency: { type: String, default: '$' },
 }, { _id: false });
 
