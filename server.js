@@ -203,6 +203,54 @@ const adminUserSchema = new mongoose.Schema({
 adminUserSchema.index({ email: 1 }, { unique: true });
 const AdminUser = mongoose.model('AdminUser', adminUserSchema, 'admin_users');
 
+// Service Order Schema
+const serviceOrderSchema = new mongoose.Schema({
+  orderNumber: { type: String, required: true, unique: true },
+  buyerUid: { type: String, required: true },
+  carId: { type: String, default: null },
+  carSnapshot: {
+    makeName: String,
+    modelName: String,
+    year: Number,
+    price: Number,
+    currency: String,
+    imageUrl: String,
+    listingId: String,
+  },
+  providerUid: { type: String, required: true },
+  providerType: { type: String, enum: ['broker', 'logistics'], required: true },
+  providerSnapshot: {
+    companyName: String,
+    phoneNumber: String,
+    telegramUsername: String,
+  },
+  services: [{
+    name: { type: String, required: true },
+    description: String,
+    fee: mongoose.Schema.Types.Mixed,
+    currency: String,
+  }],
+  totalAmount: { type: Number, default: 0 },
+  totalCurrency: { type: String, default: '$' },
+  status: { type: String, enum: ['pending', 'accepted', 'in_progress', 'completed', 'cancelled', 'rejected'], default: 'pending' },
+  buyerNote: { type: String, default: '' },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now },
+});
+serviceOrderSchema.index({ buyerUid: 1, createdAt: -1 });
+serviceOrderSchema.index({ providerUid: 1, createdAt: -1 });
+serviceOrderSchema.index({ orderNumber: 1 }, { unique: true });
+const ServiceOrder = mongoose.model('ServiceOrder', serviceOrderSchema, 'service_orders');
+
+const generateOrderNumber = () => {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let result = 'ORD-';
+  for (let i = 0; i < 3; i++) result += chars.charAt(Math.floor(Math.random() * chars.length));
+  result += '-';
+  for (let i = 0; i < 3; i++) result += chars.charAt(Math.floor(Math.random() * chars.length));
+  return result;
+};
+
 const seedSuperAdmin = async () => {
   const email = process.env.SUPER_ADMIN_EMAIL;
   if (!email) {
@@ -1026,6 +1074,143 @@ app.delete('/api/admin/users/:adminId', async (req, res) => {
     res.json({ message: 'Admin removed' });
   } catch (error) {
     console.error('Remove admin error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// --- Service Order Routes ---
+
+// Create orders from cart (one order per provider)
+app.post('/api/orders', async (req, res) => {
+  try {
+    const { buyerUid, car, items } = req.body;
+    if (!buyerUid || !items || !items.length) {
+      return res.status(400).json({ message: 'buyerUid and items required' });
+    }
+
+    const providerGroups = {};
+    for (const item of items) {
+      const key = `${item.providerUid}_${item.providerType}`;
+      if (!providerGroups[key]) {
+        providerGroups[key] = {
+          providerUid: item.providerUid,
+          providerType: item.providerType,
+          providerSnapshot: item.providerSnapshot,
+          services: [],
+        };
+      }
+      providerGroups[key].services.push(item.service);
+    }
+
+    const orders = [];
+    for (const group of Object.values(providerGroups)) {
+      let totalAmount = 0;
+      let totalCurrency = '$';
+      for (const svc of group.services) {
+        const fee = parseFloat(svc.fee);
+        if (!isNaN(fee)) {
+          totalAmount += fee;
+          if (svc.currency) totalCurrency = svc.currency;
+        }
+      }
+
+      let orderNumber;
+      let isUnique = false;
+      while (!isUnique) {
+        orderNumber = generateOrderNumber();
+        const existing = await ServiceOrder.findOne({ orderNumber });
+        if (!existing) isUnique = true;
+      }
+
+      const order = await ServiceOrder.create({
+        orderNumber,
+        buyerUid,
+        carId: car?.id || null,
+        carSnapshot: car ? {
+          makeName: car.makeName,
+          modelName: car.modelName,
+          year: car.year,
+          price: car.price,
+          currency: car.currency,
+          imageUrl: car.imageUrl,
+          listingId: car.listingId,
+        } : null,
+        providerUid: group.providerUid,
+        providerType: group.providerType,
+        providerSnapshot: group.providerSnapshot,
+        services: group.services,
+        totalAmount,
+        totalCurrency,
+        buyerNote: req.body.buyerNote || '',
+      });
+      orders.push({ ...order.toObject(), id: order._id.toString() });
+    }
+
+    res.status(201).json({ orders });
+  } catch (error) {
+    console.error('Create orders error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Get orders for buyer
+app.get('/api/orders/buyer/:uid', async (req, res) => {
+  try {
+    const orders = await ServiceOrder.find({ buyerUid: req.params.uid }).sort({ createdAt: -1 }).lean();
+    res.json(orders.map(o => ({ ...o, id: o._id.toString() })));
+  } catch (error) {
+    console.error('Fetch buyer orders error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Get orders for provider
+app.get('/api/orders/provider/:uid', async (req, res) => {
+  try {
+    const orders = await ServiceOrder.find({ providerUid: req.params.uid }).sort({ createdAt: -1 }).lean();
+    const enriched = await Promise.all(orders.map(async (o) => {
+      const buyer = await User.findOne({ firebaseUid: o.buyerUid }).select('firstName lastName email phoneNumber avatarUrl').lean();
+      return {
+        ...o,
+        id: o._id.toString(),
+        buyerName: buyer ? `${buyer.firstName || ''} ${buyer.lastName || ''}`.trim() : '',
+        buyerEmail: buyer?.email || '',
+        buyerPhone: buyer?.phoneNumber || '',
+        buyerAvatar: buyer?.avatarUrl || null,
+      };
+    }));
+    res.json(enriched);
+  } catch (error) {
+    console.error('Fetch provider orders error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Update order status (provider or buyer for cancel)
+app.patch('/api/orders/:id/status', async (req, res) => {
+  try {
+    const { status, callerUid } = req.body;
+    if (!status || !callerUid) return res.status(400).json({ message: 'status and callerUid required' });
+
+    const validStatuses = ['accepted', 'in_progress', 'completed', 'cancelled', 'rejected'];
+    if (!validStatuses.includes(status)) return res.status(400).json({ message: 'Invalid status' });
+
+    const order = await ServiceOrder.findById(req.params.id);
+    if (!order) return res.status(404).json({ message: 'Order not found' });
+
+    const isProvider = order.providerUid === callerUid;
+    const isBuyer = order.buyerUid === callerUid;
+    if (!isProvider && !isBuyer) return res.status(403).json({ message: 'Unauthorized' });
+
+    if (isBuyer && status !== 'cancelled') return res.status(403).json({ message: 'Buyers can only cancel orders' });
+
+    order.status = status;
+    order.updatedAt = new Date();
+    await order.save();
+
+    res.json({ ...order.toObject(), id: order._id.toString() });
+  } catch (error) {
+    console.error('Update order status error:', error);
     res.status(500).json({ message: error.message });
   }
 });
