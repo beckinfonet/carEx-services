@@ -229,6 +229,7 @@ const serviceOrderSchema = new mongoose.Schema({
     description: String,
     fee: mongoose.Schema.Types.Mixed,
     currency: String,
+    status: { type: String, enum: ['pending', 'in_progress', 'blocked', 'completed', 'cancelled'], default: 'pending' },
   }],
   totalAmount: { type: Number, default: 0 },
   totalCurrency: { type: String, default: '$' },
@@ -1186,7 +1187,18 @@ app.get('/api/orders/provider/:uid', async (req, res) => {
   }
 });
 
-// Update order status (provider or buyer for cancel)
+// Derive order-level status from individual service statuses
+function deriveOrderStatus(services) {
+  const statuses = services.map(s => s.status || 'pending');
+  if (statuses.every(s => s === 'completed')) return 'completed';
+  if (statuses.every(s => s === 'cancelled')) return 'cancelled';
+  if (statuses.some(s => s === 'blocked')) return 'in_progress';
+  if (statuses.some(s => s === 'in_progress')) return 'in_progress';
+  if (statuses.some(s => s === 'completed') || statuses.some(s => s === 'in_progress')) return 'in_progress';
+  return 'pending';
+}
+
+// Update overall order status (provider or buyer for cancel)
 app.patch('/api/orders/:id/status', async (req, res) => {
   try {
     const { status, callerUid } = req.body;
@@ -1204,6 +1216,10 @@ app.patch('/api/orders/:id/status', async (req, res) => {
 
     if (isBuyer && status !== 'cancelled') return res.status(403).json({ message: 'Buyers can only cancel orders' });
 
+    if (isBuyer && status === 'cancelled') {
+      order.services.forEach(s => { s.status = 'cancelled'; });
+    }
+
     order.status = status;
     order.updatedAt = new Date();
     await order.save();
@@ -1211,6 +1227,37 @@ app.patch('/api/orders/:id/status', async (req, res) => {
     res.json({ ...order.toObject(), id: order._id.toString() });
   } catch (error) {
     console.error('Update order status error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Update individual service status within an order
+app.patch('/api/orders/:id/services/:serviceIndex/status', async (req, res) => {
+  try {
+    const { status, callerUid } = req.body;
+    const serviceIndex = parseInt(req.params.serviceIndex);
+    if (!status || !callerUid) return res.status(400).json({ message: 'status and callerUid required' });
+
+    const validStatuses = ['pending', 'in_progress', 'blocked', 'completed', 'cancelled'];
+    if (!validStatuses.includes(status)) return res.status(400).json({ message: 'Invalid status' });
+
+    const order = await ServiceOrder.findById(req.params.id);
+    if (!order) return res.status(404).json({ message: 'Order not found' });
+
+    if (order.providerUid !== callerUid) return res.status(403).json({ message: 'Only the provider can update service status' });
+
+    if (isNaN(serviceIndex) || serviceIndex < 0 || serviceIndex >= order.services.length) {
+      return res.status(400).json({ message: 'Invalid service index' });
+    }
+
+    order.services[serviceIndex].status = status;
+    order.status = deriveOrderStatus(order.services);
+    order.updatedAt = new Date();
+    await order.save();
+
+    res.json({ ...order.toObject(), id: order._id.toString() });
+  } catch (error) {
+    console.error('Update service status error:', error);
     res.status(500).json({ message: error.message });
   }
 });
