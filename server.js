@@ -118,6 +118,8 @@ const carSchema = new mongoose.Schema({
   listingId: String,
   sellerId: String, // Firebase UID of listing owner
   listingStatus: { type: String, enum: ['active', 'booked', 'sold'], default: 'active' },
+  bookedByUid: { type: String, default: null },
+  stripePaymentIntentId: { type: String, default: null },
 });
 
 const Car = mongoose.model('Car', carSchema);
@@ -1105,11 +1107,44 @@ app.post('/api/payments/create-payment-intent', async (req, res) => {
 
     res.json({
       clientSecret: paymentIntent.client_secret,
+      paymentIntentId: paymentIntent.id,
       amount,
       currency: stripeCurrency,
     });
   } catch (error) {
     console.error('Create PaymentIntent error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.post('/api/payments/confirm-booking', async (req, res) => {
+  try {
+    const { paymentIntentId, carId, buyerUid } = req.body;
+    if (!paymentIntentId || !carId || !buyerUid) {
+      return res.status(400).json({ message: 'paymentIntentId, carId, and buyerUid required' });
+    }
+
+    const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+    if (paymentIntent.status !== 'succeeded') {
+      return res.status(400).json({ message: `Payment not completed (status: ${paymentIntent.status})` });
+    }
+
+    const car = await Car.findById(carId);
+    if (!car) return res.status(404).json({ message: 'Car not found' });
+
+    car.listingStatus = 'booked';
+    car.bookedByUid = buyerUid;
+    car.stripePaymentIntentId = paymentIntentId;
+    await car.save();
+
+    res.json({
+      ...car.toObject(),
+      id: car._id.toString(),
+      make: car.makeName || car.make || '',
+      model: car.modelName || car.model || '',
+    });
+  } catch (error) {
+    console.error('Confirm booking error:', error);
     res.status(500).json({ message: error.message });
   }
 });
