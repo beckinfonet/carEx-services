@@ -5,6 +5,7 @@ const dotenv = require('dotenv');
 const { S3Client } = require('@aws-sdk/client-s3');
 const multer = require('multer');
 const multerS3 = require('multer-s3');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 dotenv.config();
 
@@ -1075,6 +1076,40 @@ app.delete('/api/admin/users/:adminId', async (req, res) => {
     res.json({ message: 'Admin removed' });
   } catch (error) {
     console.error('Remove admin error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// --- Stripe Payment Routes ---
+
+const BOOKING_FEE_KGS = 500000; // 5 000 KGS in tiyin (smallest unit)
+const BOOKING_FEE_USD = 5800;   // ~$58 USD in cents (approximate KGS→USD)
+
+app.get('/api/payments/config', (req, res) => {
+  res.json({ publishableKey: process.env.STRIPE_PUBLISHABLE_KEY });
+});
+
+app.post('/api/payments/create-payment-intent', async (req, res) => {
+  try {
+    const { currency = 'kgs', carId, buyerUid } = req.body;
+    if (!buyerUid) return res.status(400).json({ message: 'buyerUid required' });
+
+    const amount = currency === 'usd' ? BOOKING_FEE_USD : BOOKING_FEE_KGS;
+    const stripeCurrency = currency === 'usd' ? 'usd' : 'kgs';
+
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount,
+      currency: stripeCurrency,
+      metadata: { carId: carId || '', buyerUid },
+    });
+
+    res.json({
+      clientSecret: paymentIntent.client_secret,
+      amount,
+      currency: stripeCurrency,
+    });
+  } catch (error) {
+    console.error('Create PaymentIntent error:', error);
     res.status(500).json({ message: error.message });
   }
 });
