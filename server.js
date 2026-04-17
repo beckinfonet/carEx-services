@@ -13,6 +13,7 @@ const User = require('./src/models/User');
 const AdminUser = require('./src/models/AdminUser');
 const { verifyIdToken } = require('./src/security/verifyIdToken');
 const { requireAdmin } = require('./src/security/requireAdmin');
+const { ensureBaseline } = require('./src/security/ensureBaseline');
 const moderationRouter = require('./src/moderation/router');
 
 const app = express();
@@ -27,6 +28,7 @@ mongoose.connect(process.env.MONGODB_URI, { dbName: 'CarEx' })
   .then(async () => {
     console.log('Connected to MongoDB');
     await seedSuperAdmin();
+    await ensureBaseline();
   })
   .catch((err) => console.error('MongoDB connection error:', err));
 
