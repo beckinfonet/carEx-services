@@ -20,6 +20,7 @@ const { attachAuthIfPresent } = require('./src/security/attachAuthIfPresent');
 const { requireNotSuspended } = require('./src/security/requireNotSuspended');
 const { ensureBaseline } = require('./src/security/ensureBaseline');
 const moderationRouter = require('./src/moderation/router');
+const { confirmBooking: confirmBookingService, ProviderSuspendedError } = require('./src/payments/confirmBooking');
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -1034,35 +1035,43 @@ app.post('/api/payments/create-payment-intent', attachAuthIfPresent, requireNotS
   }
 });
 
+// Thin delegation to the transactional confirm-booking service (Plan 03-04).
+// All Stripe + buyer/provider/seller re-check + car flip + ServiceOrder creation
+// lives in src/payments/confirmBooking.js so the TOCTOU gap between
+// create-payment-intent and confirm-booking is closed inside a single
+// session.withTransaction(). This handler only routes errors to HTTP codes.
 app.post('/api/payments/confirm-booking', attachAuthIfPresent, requireNotSuspended('create_order'), async (req, res) => {
+  const { paymentIntentId, carId, buyerUid, items = [] } = req.body || {};
   try {
-    const { paymentIntentId, carId, buyerUid } = req.body;
-    if (!paymentIntentId || !carId || !buyerUid) {
-      return res.status(400).json({ message: 'paymentIntentId, carId, and buyerUid required' });
-    }
-
-    const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
-    if (paymentIntent.status !== 'succeeded') {
-      return res.status(400).json({ message: `Payment not completed (status: ${paymentIntent.status})` });
-    }
-
-    const car = await Car.findById(carId);
-    if (!car) return res.status(404).json({ message: 'Car not found' });
-
-    car.listingStatus = 'booked';
-    car.bookedByUid = buyerUid;
-    car.stripePaymentIntentId = paymentIntentId;
-    await car.save();
-
-    res.json({
-      ...car.toObject(),
-      id: car._id.toString(),
-      make: car.makeName || car.make || '',
-      model: car.modelName || car.model || '',
+    const result = await confirmBookingService({
+      stripe,
+      paymentIntentId,
+      carId,
+      buyerUid,
+      items,
     });
-  } catch (error) {
-    console.error('Confirm booking error:', error);
-    res.status(500).json({ message: error.message });
+    return res.json(result);
+  } catch (err) {
+    if (err instanceof ProviderSuspendedError) {
+      return res.status(409).json({
+        error: 'provider_suspended',
+        providerUid: err.providerUid,
+        refundId: err.refundId,
+        refundFailed: err.refundFailed,
+      });
+    }
+    if (err && (err.code === 'invalid_payment_intent' || err.message === 'invalid_payment_intent')) {
+      return res.status(400).json({
+        error: 'invalid_payment_intent',
+        message: 'PaymentIntent is not succeeded',
+      });
+    }
+    if (err && err.message === 'car_not_found') {
+      return res.status(404).json({ error: 'car_not_found' });
+    }
+    // eslint-disable-next-line no-console
+    console.error('[confirm-booking]', err);
+    return res.status(500).json({ error: 'internal_error' });
   }
 });
 
