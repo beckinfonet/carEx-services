@@ -1077,102 +1077,17 @@ app.post('/api/payments/confirm-booking', attachAuthIfPresent, requireNotSuspend
 
 // --- Service Order Routes ---
 
-// Create orders from cart (one order per provider)
-app.post('/api/orders', async (req, res) => {
-  try {
-    const { buyerUid, car, items } = req.body;
-    if (!buyerUid || !items || !items.length) {
-      return res.status(400).json({ message: 'buyerUid and items required' });
-    }
-
-    const providerGroups = {};
-    for (const item of items) {
-      const key = `${item.providerUid}_${item.providerType}`;
-      if (!providerGroups[key]) {
-        // Server-authoritative providerSnapshot per D-22/D-23. The client-supplied
-        // `item.providerSnapshot` is intentionally ignored — we resolve every field
-        // from the Broker/LogisticsPartner profile + the owner User so buyer-visible
-        // order history survives a later hard-delete of the provider profile.
-        let profile = null;
-        if (item.providerType === 'broker') {
-          profile = await Broker.findOne({ ownerUid: item.providerUid }).lean();
-        } else if (item.providerType === 'logistics') {
-          profile = await LogisticsPartner.findOne({ ownerUid: item.providerUid }).lean();
-        }
-        const ownerUser = await User.findOne({ firebaseUid: item.providerUid }).lean();
-        if (!profile || !ownerUser) {
-          console.warn(
-            `[providerSnapshot] Warning: provider ${item.providerUid} (${item.providerType}) not fully resolvable at order creation — profile=${!!profile}, user=${!!ownerUser}`
-          );
-        }
-        providerGroups[key] = {
-          providerUid: item.providerUid,
-          providerType: item.providerType,
-          providerSnapshot: {
-            companyName: profile?.companyName ?? null,
-            phoneNumber: profile?.phoneNumber ?? null,
-            telegramUsername: profile?.telegramUsername ?? null,
-            email: ownerUser?.email ?? null,
-            firstName: ownerUser?.firstName ?? null,
-            lastName: ownerUser?.lastName ?? null,
-            providerRole: item.providerType,
-            snapshotAt: new Date(),
-          },
-          services: [],
-        };
-      }
-      providerGroups[key].services.push(item.service);
-    }
-
-    const orders = [];
-    for (const group of Object.values(providerGroups)) {
-      let totalAmount = 0;
-      let totalCurrency = '$';
-      for (const svc of group.services) {
-        const fee = parseFloat(svc.fee);
-        if (!isNaN(fee)) {
-          totalAmount += fee;
-          if (svc.currency) totalCurrency = svc.currency;
-        }
-      }
-
-      let orderNumber;
-      let isUnique = false;
-      while (!isUnique) {
-        orderNumber = generateOrderNumber();
-        const existing = await ServiceOrder.findOne({ orderNumber });
-        if (!existing) isUnique = true;
-      }
-
-      const order = await ServiceOrder.create({
-        orderNumber,
-        buyerUid,
-        carId: car?.id || null,
-        carSnapshot: car ? {
-          makeName: car.makeName,
-          modelName: car.modelName,
-          year: car.year,
-          price: car.price,
-          currency: car.currency,
-          imageUrl: car.imageUrl,
-          listingId: car.listingId,
-        } : null,
-        providerUid: group.providerUid,
-        providerType: group.providerType,
-        providerSnapshot: group.providerSnapshot,
-        services: group.services,
-        totalAmount,
-        totalCurrency,
-        buyerNote: req.body.buyerNote || '',
-      });
-      orders.push({ ...order.toObject(), id: order._id.toString() });
-    }
-
-    res.status(201).json({ orders });
-  } catch (error) {
-    console.error('Create orders error:', error);
-    res.status(500).json({ message: error.message });
-  }
+// POST /api/orders is DEPRECATED as of Phase 3 — order creation is absorbed into
+// POST /api/payments/confirm-booking which wraps PI verify + buyer/provider/seller
+// moderation re-check + car.listingStatus flip + ServiceOrder create in one Mongo
+// transaction. Standalone POST /api/orders used to permit a TOCTOU race where a
+// provider could be suspended between confirm-booking and order creation.
+// TODO: route removal after mobile retires the call + grace period (see 03-CONTEXT.md Deferred).
+app.post('/api/orders', (req, res) => {
+  res.status(410).json({
+    error: 'deprecated',
+    message: 'Use POST /api/payments/confirm-booking which now creates orders atomically',
+  });
 });
 
 // Get orders for buyer
