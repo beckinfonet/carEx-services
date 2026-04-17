@@ -206,12 +206,94 @@ async function unsuspend({ adminUid, adminEmail, targetUid, note }) {
   };
 }
 
-// --- stubs still owned by Plans 02-04 and 02-05 -------------------------
-// Signatures locked in Phase 1; bodies filled by the plans listed below.
+// --- revokeRole (ADMIN-03, D-08..D-12) ----------------------------------
+//
+// Strips User.{role}Status → 'NONE' and writes an audit row inside one transaction.
+// Does NOT delete Broker / LogisticsPartner doc (D-08 preservation — provider profile
+// stays for historical lookups; read-layer hides revoked roles in Phase 3 ENF-02).
+// Does NOT mutate user.moderationStatus (D-12 — revoke is orthogonal to suspension).
+// Last-admin guard is SKIPPED per D-28 — admin-ness lives in AdminUser, not in User
+// role fields, so revoke_role can never make someone "less of an admin".
+const ROLE_FIELD_BY_NAME = {
+  seller: 'sellerStatus',
+  broker: 'brokerStatus',
+  logistics: 'logisticsStatus',
+};
 
-async function revokeRole(/* { adminUid, adminEmail, targetUid, role, reasonCategory, note } */) {
-  throw new NotImplementedError('revokeRole');
+async function revokeRole({ adminUid, adminEmail, targetUid, role, reasonCategory, note }) {
+  if (!adminUid || !adminEmail || !targetUid || !role || !reasonCategory) {
+    throw new Error('revokeRole: adminUid, adminEmail, targetUid, role, reasonCategory are required');
+  }
+
+  const roleField = ROLE_FIELD_BY_NAME[role];
+  if (!roleField) {
+    // Zod at the router should prevent this (roleEnumAll), but defensive at the
+    // service boundary so direct service calls (tests, future internal callers)
+    // can't bypass the whitelist via the dynamic $set below (T-02-04-06 mitigation).
+    throw new Error('invalid_role');
+  }
+
+  const target = await User.findOne({ firebaseUid: targetUid }).lean();
+  if (!target) throw new Error('target_not_found');
+
+  // D-11: role must be currently APPROVED to be revokable. NONE / PENDING / REJECTED
+  // are handled by the legacy approve/reject flow (01-CONTEXT.md D-05), not by
+  // moderation. Reject BEFORE opening a transaction so no orphan audit row lands on
+  // rejection (Test 4 + 5 assert audits.length === 0 after the throw).
+  if (target[roleField] !== 'APPROVED') {
+    throw new Error('role_not_assigned');
+  }
+
+  const session = await mongoose.startSession();
+  let insertedAction;
+  try {
+    await session.withTransaction(async () => {
+      // 1. Insert audit row FIRST (consistent with suspend/unsuspend pattern from
+      //    Plan 02-03). Array form required for { session } per the writeAction
+      //    bypass note at top of file.
+      const [action] = await ModerationAction.create([{
+        targetUid,
+        adminUid,
+        adminEmail,
+        action: 'revoke_role',
+        severity: 'none',
+        reasonCategory,
+        note: note ?? null,
+        roleAffected: role,
+      }], { session });
+      insertedAction = action;
+
+      // 2. Strip the role. Dynamic field name via $set on whitelisted roleField.
+      const updated = await User.updateOne(
+        { firebaseUid: targetUid },
+        { $set: { [roleField]: 'NONE' } },
+        { session }
+      );
+      if (updated.matchedCount !== 1) throw new Error('target_not_found');
+
+      // 3. EXPLICITLY do NOT touch the Broker / LogisticsPartner document (D-08
+      //    preservation — Pitfall 9). EXPLICITLY do NOT touch user.moderationStatus
+      //    (D-12 orthogonality). These are negative invariants enforced by Tests
+      //    2/3 (provider doc still exists) and Test 6 (moderationStatus unchanged).
+    });
+  } finally {
+    await session.endSession();
+  }
+
+  return {
+    ok: true,
+    user: { [roleField]: 'NONE' },
+    action: {
+      _id: insertedAction._id.toString(),
+      action: insertedAction.action,
+      roleAffected: insertedAction.roleAffected,
+      createdAt: insertedAction.createdAt,
+    },
+  };
 }
+
+// --- stubs still owned by Plan 02-05 ------------------------------------
+// Signatures locked in Phase 1; bodies filled by the plan listed below.
 
 async function deleteProviderProfile(/* { adminUid, adminEmail, targetUid, role, reasonCategory, note } */) {
   throw new NotImplementedError('deleteProviderProfile');
