@@ -34,6 +34,7 @@ const KNOWN_USER_ERRORS = new Set([
   'invalid_field',             // Plan 02-05 (edit-profile)
   'no_changes',                // Plan 02-05 (edit-profile)
   'invalid_role_for_delete',   // Plan 02-05
+  'provider_profile_not_found', // Plan 02-05 (delete-provider-profile)
 ]);
 
 function handleServiceError(err, res, tag) {

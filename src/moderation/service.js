@@ -292,14 +292,125 @@ async function revokeRole({ adminUid, adminEmail, targetUid, role, reasonCategor
   };
 }
 
-// --- stubs still owned by Plan 02-05 ------------------------------------
-// Signatures locked in Phase 1; bodies filled by the plan listed below.
+// --- deleteProviderProfile (ADMIN-04, D-13..D-16) -----------------------
+//
+// Hard-deletes the Broker / LogisticsPartner doc + strips User.{role}Status → 'NONE'
+// + appends an audit row, all inside one transaction (D-13). Past orders survive via
+// ServiceOrder.providerSnapshot (D-15, populated by Phase 1 D-21..D-24) — this handler
+// NEVER touches the service_orders collection (Pitfall 3 mitigation, T-02-05-01).
+//
+// role='seller' is rejected at the router via Zod's roleEnumProfileDeletable (D-14);
+// service-layer also throws invalid_role_for_delete defensively for direct callers.
+//
+// Last-admin guard NOT applied (D-28 reasoning carries through from revokeRole):
+// admin-ness lives in AdminUser, not in Broker/LogisticsPartner profile rows.
+const PROFILE_MODEL_BY_ROLE = {
+  broker: 'Broker',
+  logistics: 'LogisticsPartner',
+};
 
-async function deleteProviderProfile(/* { adminUid, adminEmail, targetUid, role, reasonCategory, note } */) {
-  throw new NotImplementedError('deleteProviderProfile');
+function getProfileModel(role) {
+  const modelName = PROFILE_MODEL_BY_ROLE[role];
+  if (!modelName) throw new Error('invalid_role_for_delete');
+  // Lazy lookup — server.js registers these at app boot. In test runtime the test
+  // file registers loose-schema variants under the canonical names BEFORE require'ing
+  // service.js, so this resolves to the test seed model. Either way, the dynamic
+  // resolution is bounded by the PROFILE_MODEL_BY_ROLE whitelist (no injection vector).
+  return mongoose.model(modelName);
 }
 
-async function editProfile(/* { adminUid, adminEmail, targetUid, role, fieldDiff, note } */) {
+async function deleteProviderProfile({ adminUid, adminEmail, targetUid, role, reasonCategory, note }) {
+  if (!adminUid || !adminEmail || !targetUid || !role || !reasonCategory) {
+    throw new Error('deleteProviderProfile: adminUid, adminEmail, targetUid, role, reasonCategory are required');
+  }
+
+  // D-14 defensive guard. Zod (deleteProfileSchema → roleEnumProfileDeletable) rejects
+  // role=seller at the router, but service layer must not depend on external validation
+  // for correctness. Throw before any DB I/O.
+  if (role !== 'broker' && role !== 'logistics') {
+    throw new Error('invalid_role_for_delete');
+  }
+
+  const ProfileModel = getProfileModel(role);
+  const roleField = role === 'broker' ? 'brokerStatus' : 'logisticsStatus';
+
+  const target = await User.findOne({ firebaseUid: targetUid }).lean();
+  if (!target) throw new Error('target_not_found');
+  if (target[roleField] !== 'APPROVED') {
+    // D-13 implicit precondition: only APPROVED providers have a meaningful profile to
+    // delete. NONE / PENDING / REJECTED skip the moderation path. Symmetric with
+    // revokeRole's pre-txn check; throws BEFORE the session opens so no orphan audit
+    // row lands on rejection.
+    throw new Error('role_not_assigned');
+  }
+
+  const existingProfile = await ProfileModel.findOne({ ownerUid: targetUid }).lean();
+  if (!existingProfile) {
+    // User claims the role but the profile doc is missing — data-integrity bug. Refuse
+    // to create an audit row for a delete that can't actually delete anything. The
+    // admin should escalate to ops (the audit ledger should not record phantom deletes).
+    throw new Error('provider_profile_not_found');
+  }
+
+  const session = await mongoose.startSession();
+  let insertedAction;
+  try {
+    await session.withTransaction(async () => {
+      // 1. Insert audit row FIRST (consistent with suspend / unsuspend / revokeRole
+      //    pattern from Plans 02-03/04). Array form required by Mongoose for { session }.
+      const [action] = await ModerationAction.create([{
+        targetUid,
+        adminUid,
+        adminEmail,
+        action: 'delete_provider_profile',
+        severity: 'none',
+        reasonCategory,
+        note: note ?? null,
+        roleAffected: role,
+      }], { session });
+      insertedAction = action;
+
+      // 2. Hard-delete provider doc (D-13 step 1). Race-guard via deletedCount === 1.
+      const deleteResult = await ProfileModel.deleteOne({ ownerUid: targetUid }, { session });
+      if (deleteResult.deletedCount !== 1) {
+        // Doc was deleted between our pre-check and the transaction (concurrent admin
+        // action). Abort cleanly so withTransaction rolls back the audit row insert.
+        throw new Error('provider_profile_not_found');
+      }
+
+      // 3. Strip the role on User (D-13 step 2). Without this, User would claim a role
+      //    pointing at a non-existent profile — inconsistent state.
+      const updated = await User.updateOne(
+        { firebaseUid: targetUid },
+        { $set: { [roleField]: 'NONE' } },
+        { session }
+      );
+      if (updated.matchedCount !== 1) throw new Error('target_not_found');
+
+      // 4. EXPLICITLY do NOT touch service_orders (D-15, Pitfall 3, T-02-05-01).
+      //    Past orders survive via providerSnapshot — that's the whole point of the
+      //    Phase 1 denormalization. Negative invariant enforced by Test 1 assertion.
+    });
+  } finally {
+    await session.endSession();
+  }
+
+  return {
+    ok: true,
+    user: { [roleField]: 'NONE' },
+    action: {
+      _id: insertedAction._id.toString(),
+      action: insertedAction.action,
+      roleAffected: insertedAction.roleAffected,
+      createdAt: insertedAction.createdAt,
+    },
+  };
+}
+
+// --- stub still owned by Plan 02-05 (Task 2) ----------------------------
+// Signature locked in Phase 1; body filled by Task 2 below.
+
+async function editProfile(/* { adminUid, adminEmail, targetUid, role, fields, note } */) {
   throw new NotImplementedError('editProfile');
 }
 
