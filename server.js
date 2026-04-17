@@ -1,13 +1,20 @@
+const dotenv = require('dotenv');
+dotenv.config();
+
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
-const dotenv = require('dotenv');
 const { S3Client } = require('@aws-sdk/client-s3');
 const multer = require('multer');
 const multerS3 = require('multer-s3');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
-dotenv.config();
+const User = require('./src/models/User');
+const AdminUser = require('./src/models/AdminUser');
+const { verifyIdToken } = require('./src/security/verifyIdToken');
+const { requireAdmin } = require('./src/security/requireAdmin');
+const { ensureBaseline } = require('./src/security/ensureBaseline');
+const moderationRouter = require('./src/moderation/router');
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -21,6 +28,7 @@ mongoose.connect(process.env.MONGODB_URI, { dbName: 'CarEx' })
   .then(async () => {
     console.log('Connected to MongoDB');
     await seedSuperAdmin();
+    await ensureBaseline();
   })
   .catch((err) => console.error('MongoDB connection error:', err));
 
@@ -124,26 +132,7 @@ const carSchema = new mongoose.Schema({
 
 const Car = mongoose.model('Car', carSchema);
 
-// User Schema
-const userSchema = new mongoose.Schema({
-  firebaseUid: { type: String, required: true, unique: true },
-  email: { type: String, required: true },
-  firstName: String,
-  lastName: String,
-  phoneNumber: String,
-  telegramUsername: String,
-  avatarUrl: String,
-  sellerStatus: { type: String, enum: ['NONE', 'PENDING', 'APPROVED', 'REJECTED'], default: 'NONE' },
-  sellerRequestDate: Date,
-  brokerStatus: { type: String, enum: ['NONE', 'PENDING', 'APPROVED', 'REJECTED'], default: 'NONE' },
-  brokerRequestDate: Date,
-  logisticsStatus: { type: String, enum: ['NONE', 'PENDING', 'APPROVED', 'REJECTED'], default: 'NONE' },
-  logisticsRequestDate: Date,
-  isPhoneVerified: { type: Boolean, default: false },
-  createdAt: { type: Date, default: Date.now },
-});
-
-const User = mongoose.model('User', userSchema);
+// User model extracted to src/models/User.js (Plan 01-01)
 
 // Service item sub-schema (shared by broker and logistics)
 const serviceItemSchema = new mongoose.Schema({
@@ -197,14 +186,7 @@ const otpSchema = new mongoose.Schema({
 });
 const OTP = mongoose.model('OTP', otpSchema);
 
-// Admin User Schema
-const adminUserSchema = new mongoose.Schema({
-  email: { type: String, required: true, unique: true },
-  role: { type: String, enum: ['superadmin', 'admin'], default: 'admin' },
-  createdAt: { type: Date, default: Date.now },
-});
-adminUserSchema.index({ email: 1 }, { unique: true });
-const AdminUser = mongoose.model('AdminUser', adminUserSchema, 'admin_users');
+// AdminUser model extracted to src/models/AdminUser.js (Plan 01-01)
 
 // Service Order Schema
 const serviceOrderSchema = new mongoose.Schema({
@@ -226,6 +208,11 @@ const serviceOrderSchema = new mongoose.Schema({
     companyName: String,
     phoneNumber: String,
     telegramUsername: String,
+    email: String,
+    firstName: String,
+    lastName: String,
+    providerRole: { type: String, enum: ['broker', 'logistics'], default: null },
+    snapshotAt: { type: Date, default: Date.now },
   },
   services: [{
     name: { type: String, required: true },
@@ -925,6 +912,12 @@ app.put('/api/cars/:id', upload.array('images', 25), async (req, res) => {
 
 // --- Admin Routes ---
 
+// New moderation surface (SEC-01 + SEC-02). Mounted BEFORE legacy /api/admin/*
+// routes so the Bearer-idToken chain applies first. Per D-05 (hybrid cutover),
+// legacy routes below keep their existing callerUid-in-body pattern until a
+// follow-up milestone migrates them (D-06).
+app.use('/api/admin/moderation', verifyIdToken, requireAdmin, moderationRouter);
+
 // Check if current user is an admin
 app.get('/api/admin/status/:uid', async (req, res) => {
   try {
@@ -1163,10 +1156,35 @@ app.post('/api/orders', async (req, res) => {
     for (const item of items) {
       const key = `${item.providerUid}_${item.providerType}`;
       if (!providerGroups[key]) {
+        // Server-authoritative providerSnapshot per D-22/D-23. The client-supplied
+        // `item.providerSnapshot` is intentionally ignored — we resolve every field
+        // from the Broker/LogisticsPartner profile + the owner User so buyer-visible
+        // order history survives a later hard-delete of the provider profile.
+        let profile = null;
+        if (item.providerType === 'broker') {
+          profile = await Broker.findOne({ ownerUid: item.providerUid }).lean();
+        } else if (item.providerType === 'logistics') {
+          profile = await LogisticsPartner.findOne({ ownerUid: item.providerUid }).lean();
+        }
+        const ownerUser = await User.findOne({ firebaseUid: item.providerUid }).lean();
+        if (!profile || !ownerUser) {
+          console.warn(
+            `[providerSnapshot] Warning: provider ${item.providerUid} (${item.providerType}) not fully resolvable at order creation — profile=${!!profile}, user=${!!ownerUser}`
+          );
+        }
         providerGroups[key] = {
           providerUid: item.providerUid,
           providerType: item.providerType,
-          providerSnapshot: item.providerSnapshot,
+          providerSnapshot: {
+            companyName: profile?.companyName ?? null,
+            phoneNumber: profile?.phoneNumber ?? null,
+            telegramUsername: profile?.telegramUsername ?? null,
+            email: ownerUser?.email ?? null,
+            firstName: ownerUser?.firstName ?? null,
+            lastName: ownerUser?.lastName ?? null,
+            providerRole: item.providerType,
+            snapshotAt: new Date(),
+          },
           services: [],
         };
       }
@@ -1347,6 +1365,13 @@ app.use((err, req, res, next) => {
   next();
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+// Only bind the port when run directly (e.g. `node server.js`, Railway).
+// Under Jest + supertest we `require('./server.js')` and want the Express app
+// without a live listener. Production behavior is unchanged.
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+}
+
+module.exports = { app };
