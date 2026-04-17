@@ -17,9 +17,16 @@
 const express = require('express');
 const service = require('./service');
 const { denySelfModeration } = require('./denySelfModeration');
+const { moderationRateLimiter } = require('./rateLimit');
 const { dispatchSchema, unsuspendSchema, deleteProfileSchema, editProfileSchema } = require('./schemas');
 
 const router = express.Router();
+
+// SEC-04: Per-admin rate limit applied to EVERY route in this router (including /ping
+// and every mutating endpoint). Keyed on req.admin.uid by the limiter (Plan 02-02,
+// D-30/D-31/D-32). Mounted HERE — after the app-level verifyIdToken + requireAdmin chain
+// at server.js:919 (so req.admin.uid is populated) — and BEFORE any per-route handler.
+router.use(moderationRateLimiter);
 
 // Service errors this module translates to user-facing 400 responses.
 // Anything not in this set bubbles up as 500 internal_error.
