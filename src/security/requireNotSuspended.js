@@ -46,8 +46,16 @@ function requireNotSuspended(requiredCapability) {
       // Dual-accept uid resolution (D-03) — strict Bearer first, body/params fallback only if req.auth absent.
       let callerUid = req.auth?.uid;
       if (!callerUid) {
-        callerUid = req.body?.sellerId || req.body?.buyerUid || req.params?.uid;
-        if (callerUid) {
+        // WR-02 fix: shape-check the fallback candidate before accepting it.
+        // Without the guard, a non-string body value (e.g. { $ne: null } JSON
+        // payload, or any accidental object) flows straight into
+        // User.findOne({ firebaseUid: callerUid }) and opens a NoSQL
+        // operator-injection probing surface. The User.firebaseUid schema path
+        // is String so Mongoose rejects most shapes at cast, but the cheap
+        // typeof/length guard eliminates the surface entirely.
+        const candidate = req.body?.sellerId || req.body?.buyerUid || req.params?.uid;
+        if (typeof candidate === 'string' && candidate.length > 0 && candidate.length <= 128) {
+          callerUid = candidate;
           // TODO(QUAL-03, Phase 6): remove fallback + this warning once mobile wires Bearer.
           // eslint-disable-next-line no-console
           console.warn('[requireNotSuspended] deprecated body-uid fallback used', {
