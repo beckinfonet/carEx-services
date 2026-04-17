@@ -10,7 +10,9 @@
   },
   "jest": {
     "testEnvironment": "node",
-    "testMatch": ["**/__tests__/**/*.test.js"],
+    "testMatch": [
+      "**/__tests__/**/*.test.js"
+    ],
     "testTimeout": 30000
   },
   "keywords": [],
@@ -22,6 +24,7 @@
     "cors": "^2.8.6",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
+    "firebase-admin": "^13.8.0",
     "mongoose": "^9.1.5",
     "multer": "^2.0.2",
     "multer-s3": "^3.0.1",

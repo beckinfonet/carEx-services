@@ -11,6 +11,9 @@ dotenv.config();
 
 const User = require('./src/models/User');
 const AdminUser = require('./src/models/AdminUser');
+const { verifyIdToken } = require('./src/security/verifyIdToken');
+const { requireAdmin } = require('./src/security/requireAdmin');
+const moderationRouter = require('./src/moderation/router');
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -906,6 +909,12 @@ app.put('/api/cars/:id', upload.array('images', 25), async (req, res) => {
 });
 
 // --- Admin Routes ---
+
+// New moderation surface (SEC-01 + SEC-02). Mounted BEFORE legacy /api/admin/*
+// routes so the Bearer-idToken chain applies first. Per D-05 (hybrid cutover),
+// legacy routes below keep their existing callerUid-in-body pattern until a
+// follow-up milestone migrates them (D-06).
+app.use('/api/admin/moderation', verifyIdToken, requireAdmin, moderationRouter);
 
 // Check if current user is an admin
 app.get('/api/admin/status/:uid', async (req, res) => {
