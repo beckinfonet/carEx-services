@@ -407,11 +407,126 @@ async function deleteProviderProfile({ adminUid, adminEmail, targetUid, role, re
   };
 }
 
-// --- stub still owned by Plan 02-05 (Task 2) ----------------------------
-// Signature locked in Phase 1; body filled by Task 2 below.
+// --- editProfile (ADMIN-05, D-03..D-07) ---------------------------------
+//
+// Whitelist-filtered, change-diff-audited edit of Broker / LogisticsPartner identity +
+// contact fields. fieldDiff is per-field { before, after }, changed-only (D-04).
+// Unknown field → invalid_field (D-05). No-op submit → no_changes (D-06).
+// Target must have the role APPROVED (D-07) — edit is for live providers only.
+//
+// Whitelist runs TWICE (T-02-05-03 mitigation):
+//   1. Zod .strict() at the router rejects unknown top-level keys.
+//   2. Service-layer EDIT_WHITELIST_BY_ROLE check (defensive against direct callers).
+//
+// moderationStatus is EXPLICITLY not touched (D-12 carry-through, T-02-05-09): edit is
+// identity correction, not a moderation-state change. Test 8 enforces this invariant.
+const EDIT_WHITELIST_BY_ROLE = {
+  broker: ['companyName', 'phoneNumber', 'telegramUsername'],                                // D-03
+  logistics: ['companyName', 'phoneNumber', 'telegramUsername', 'coverageAreas', 'timelines'], // D-03
+};
 
-async function editProfile(/* { adminUid, adminEmail, targetUid, role, fields, note } */) {
-  throw new NotImplementedError('editProfile');
+function valuesEqual(a, b) {
+  // Deep equal via JSON stringify — handles primitive strings AND coverageAreas string
+  // arrays. Nulls / undefined are treated as equal ("absent" is absent regardless of
+  // representation). Cost is O(n) on tiny n (T-02-05-08 accepted).
+  if (a === b) return true;
+  if (a == null && b == null) return true;
+  if (a == null || b == null) return false;
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+async function editProfile({ adminUid, adminEmail, targetUid, role, fields, note }) {
+  if (!adminUid || !adminEmail || !targetUid || !role || !fields) {
+    throw new Error('editProfile: adminUid, adminEmail, targetUid, role, fields are required');
+  }
+
+  const whitelist = EDIT_WHITELIST_BY_ROLE[role];
+  if (!whitelist) throw new Error('invalid_role');
+
+  // D-05 defensive whitelist check at the service boundary. Throw BEFORE any DB read so
+  // direct callers cannot waste a round-trip on a bogus field set. err.fields carries
+  // the offending names so the router can surface them in the 400 body.
+  const submittedKeys = Object.keys(fields);
+  const unknownFields = submittedKeys.filter((k) => !whitelist.includes(k));
+  if (unknownFields.length > 0) {
+    const err = new Error('invalid_field');
+    err.fields = unknownFields;
+    throw err;
+  }
+
+  const roleField = role === 'broker' ? 'brokerStatus' : 'logisticsStatus';
+  const target = await User.findOne({ firebaseUid: targetUid }).lean();
+  if (!target) throw new Error('target_not_found');
+  // D-07: edit only on APPROVED providers. PENDING / REJECTED / NONE belong to the
+  // approve-flow path, not moderation. Throws BEFORE the txn opens (no orphan audit row).
+  if (target[roleField] !== 'APPROVED') throw new Error('role_not_assigned');
+
+  const ProfileModel = getProfileModel(role); // reuses Task 1's whitelist-bounded helper
+  const currentProfile = await ProfileModel.findOne({ ownerUid: targetUid }).lean();
+  if (!currentProfile) throw new Error('provider_profile_not_found');
+
+  // D-04 + D-06: compute fieldDiff, changed-only. Filter out keys where submitted equals
+  // current (covers no-op single-field AND no-op multi-field submissions). If fieldDiff
+  // ends up empty, throw no_changes BEFORE the txn opens — no audit row leaks.
+  const fieldDiff = {};
+  const changeSet = {};
+  for (const key of submittedKeys) {
+    const before = currentProfile[key];
+    const after = fields[key];
+    if (!valuesEqual(before, after)) {
+      fieldDiff[key] = { before: before ?? null, after };
+      changeSet[key] = after;
+    }
+  }
+  if (Object.keys(fieldDiff).length === 0) {
+    throw new Error('no_changes');
+  }
+
+  const session = await mongoose.startSession();
+  let insertedAction;
+  try {
+    await session.withTransaction(async () => {
+      // 1. Audit row first (consistent with suspend/unsuspend/revokeRole/delete pattern).
+      const [action] = await ModerationAction.create([{
+        targetUid,
+        adminUid,
+        adminEmail,
+        action: 'edit_profile',
+        severity: 'none',
+        reasonCategory: null,
+        note: note ?? null,
+        roleAffected: role,
+        fieldDiff,
+      }], { session });
+      insertedAction = action;
+
+      // 2. Apply the changeSet (whitelist-filtered + changed-only — never touches the
+      //    excluded fields like description / avatarUrl / paymentOptions / services /
+      //    status / ownerUid).
+      const updated = await ProfileModel.updateOne(
+        { ownerUid: targetUid },
+        { $set: changeSet },
+        { session }
+      );
+      if (updated.matchedCount !== 1) throw new Error('provider_profile_not_found');
+
+      // 3. EXPLICITLY do NOT mutate user.moderationStatus (D-12 orthogonality carry,
+      //    T-02-05-09). Edit corrects identity; suspension state is governed elsewhere.
+    });
+  } finally {
+    await session.endSession();
+  }
+
+  return {
+    ok: true,
+    fieldDiff,
+    action: {
+      _id: insertedAction._id.toString(),
+      action: insertedAction.action,
+      roleAffected: insertedAction.roleAffected,
+      createdAt: insertedAction.createdAt,
+    },
+  };
 }
 
 module.exports = { suspend, unsuspend, revokeRole, deleteProviderProfile, editProfile, NotImplementedError };
