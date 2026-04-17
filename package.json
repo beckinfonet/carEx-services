@@ -5,7 +5,13 @@
   "scripts": {
     "start": "node server.js",
     "seed-taxonomy": "node seed-vehicle-taxonomy.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "jest",
+    "test:watch": "jest --watch"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "testMatch": ["**/__tests__/**/*.test.js"],
+    "testTimeout": 30000
   },
   "keywords": [],
   "author": "",
@@ -21,5 +27,10 @@
     "multer-s3": "^3.0.1",
     "stripe": "^20.4.1",
     "twilio": "^5.3.4"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "mongodb-memory-server": "^10.4.3",
+    "supertest": "^7.2.2"
   }
 }
