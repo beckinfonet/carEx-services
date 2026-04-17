@@ -223,12 +223,21 @@ async function confirmBooking({ stripe, paymentIntentId, carId, buyerUid, items 
 
         // Unique orderNumber — retry until collision-free. Lookup is {session}-scoped
         // so it participates in the transaction's snapshot isolation.
+        // WR-03 fix: cap retries. The orderNumber key-space is ~3.4e10 so a
+        // genuine collision is astronomically rare, but if the orderNumber
+        // index is ever dropped/corrupted this loop would spin forever inside
+        // the Mongo transaction and exhaust the transaction lifetime.
         let orderNumber;
-        let isUnique = false;
-        while (!isUnique) {
+        let attempts = 0;
+        const MAX_ORDER_NUMBER_ATTEMPTS = 8;
+        while (attempts < MAX_ORDER_NUMBER_ATTEMPTS) {
           orderNumber = generateOrderNumber();
           const existing = await ServiceOrder.findOne({ orderNumber }).session(session).lean();
-          if (!existing) isUnique = true;
+          if (!existing) break;
+          attempts += 1;
+        }
+        if (attempts >= MAX_ORDER_NUMBER_ATTEMPTS) {
+          throw new Error('order_number_generation_exhausted');
         }
 
         const [order] = await ServiceOrder.create(
