@@ -511,7 +511,7 @@ app.get('/api/brokers/:uid', async (req, res) => {
   }
 });
 
-app.put('/api/brokers/:uid', async (req, res) => {
+app.put('/api/brokers/:uid', attachAuthIfPresent, requireNotSuspended('update_profile'), async (req, res) => {
   try {
     const { companyName, description, phoneNumber, telegramUsername, services, paymentOptions } = req.body;
     const update = {};
@@ -566,7 +566,7 @@ app.get('/api/logistics/:uid', async (req, res) => {
   }
 });
 
-app.put('/api/logistics/:uid', async (req, res) => {
+app.put('/api/logistics/:uid', attachAuthIfPresent, requireNotSuspended('update_profile'), async (req, res) => {
   try {
     const { companyName, description, phoneNumber, telegramUsername, services, coverageAreas, timelines, paymentOptions } = req.body;
     const update = {};
@@ -661,7 +661,7 @@ app.post('/api/otp/verify', async (req, res) => {
 });
 
 // Upload and create car (validate makeId/modelId)
-app.post('/api/cars', upload.array('images', 25), async (req, res) => {
+app.post('/api/cars', attachAuthIfPresent, requireNotSuspended('create_listing'), upload.array('images', 25), async (req, res) => {
   try {
     const {
       makeId, modelId, trimLevel, wheelbase, year, price, mileage, fuel, currency, description, bodyType,
@@ -1008,7 +1008,7 @@ app.get('/api/payments/config', (req, res) => {
   res.json({ publishableKey: process.env.STRIPE_PUBLISHABLE_KEY });
 });
 
-app.post('/api/payments/create-payment-intent', async (req, res) => {
+app.post('/api/payments/create-payment-intent', attachAuthIfPresent, requireNotSuspended('create_order'), async (req, res) => {
   try {
     const { currency = 'kgs', carId, buyerUid } = req.body;
     if (!buyerUid) return res.status(400).json({ message: 'buyerUid required' });
@@ -1034,7 +1034,7 @@ app.post('/api/payments/create-payment-intent', async (req, res) => {
   }
 });
 
-app.post('/api/payments/confirm-booking', async (req, res) => {
+app.post('/api/payments/confirm-booking', attachAuthIfPresent, requireNotSuspended('create_order'), async (req, res) => {
   try {
     const { paymentIntentId, carId, buyerUid } = req.body;
     if (!paymentIntentId || !carId || !buyerUid) {
