@@ -11,8 +11,13 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 const User = require('./src/models/User');
 const AdminUser = require('./src/models/AdminUser');
+const Car = require('./src/models/Car');
+const Broker = require('./src/models/Broker');
+const LogisticsPartner = require('./src/models/LogisticsPartner');
 const { verifyIdToken } = require('./src/security/verifyIdToken');
 const { requireAdmin } = require('./src/security/requireAdmin');
+const { attachAuthIfPresent } = require('./src/security/attachAuthIfPresent');
+const { requireNotSuspended } = require('./src/security/requireNotSuspended');
 const { ensureBaseline } = require('./src/security/ensureBaseline');
 const moderationRouter = require('./src/moderation/router');
 
@@ -91,92 +96,11 @@ vehicleModelSchema.index({ makeId: 1, slug: 1 }, { unique: true });
 const VehicleMake = mongoose.model('VehicleMake', vehicleMakeSchema, 'vehicle_makes');
 const VehicleModel = mongoose.model('VehicleModel', vehicleModelSchema, 'vehicle_models');
 
-// Car Schema (listings reference makeId/modelId)
-const carSchema = new mongoose.Schema({
-  makeId: { type: mongoose.Schema.Types.ObjectId, ref: 'VehicleMake' },
-  modelId: { type: mongoose.Schema.Types.ObjectId, ref: 'VehicleModel' },
-  makeName: String,
-  modelName: String,
-  make: String,  // legacy, for old listings
-  model: String, // legacy, for old listings
-  trimLevel: String,
-  wheelbase: String,
-  year: Number,
-  price: Number,
-  mileage: Number,
-  fuel: String,
-  currency: String,
-  description: String,
-  bodyType: String,
-  imageUrls: [String],
-  createdAt: { type: Date, default: Date.now },
-  engine: String,
-  transmission: String,
-  drivetrain: String,
-  mpg: String,
-  condition: String,
-  knownIssues: [String],
-  exteriorColor: String,
-  interiorColor: String,
-  interiorMaterial: String,
-  seats: Number,
-  doors: Number,
-  phoneNumber: String,
-  telegramUsername: String,
-  listingId: String,
-  sellerId: String, // Firebase UID of listing owner
-  listingStatus: { type: String, enum: ['active', 'booked', 'sold'], default: 'active' },
-  bookedByUid: { type: String, default: null },
-  stripePaymentIntentId: { type: String, default: null },
-});
-
-const Car = mongoose.model('Car', carSchema);
-
-// User model extracted to src/models/User.js (Plan 01-01)
-
-// Service item sub-schema (shared by broker and logistics)
-const serviceItemSchema = new mongoose.Schema({
-  name: { type: String, required: true },
-  description: { type: String, default: '' },
-  fee: { type: mongoose.Schema.Types.Mixed, default: 0 },
-  currency: { type: String, default: '$' },
-}, { _id: false });
-
-// Broker Schema
-const brokerSchema = new mongoose.Schema({
-  ownerUid: { type: String, required: true, unique: true },
-  companyName: { type: String, required: true },
-  description: String,
-  phoneNumber: String,
-  telegramUsername: String,
-  services: [serviceItemSchema],
-  paymentOptions: [String],
-  avatarUrl: String,
-  status: { type: String, enum: ['active', 'inactive'], default: 'active' },
-  createdAt: { type: Date, default: Date.now },
-});
-brokerSchema.index({ ownerUid: 1 }, { unique: true });
-
-const Broker = mongoose.model('Broker', brokerSchema, 'brokers');
-
-// Logistics Partner Schema
-const logisticsPartnerSchema = new mongoose.Schema({
-  ownerUid: { type: String, required: true, unique: true },
-  companyName: { type: String, required: true },
-  description: String,
-  phoneNumber: String,
-  telegramUsername: String,
-  services: [serviceItemSchema],
-  coverageAreas: [String],
-  timelines: String,
-  paymentOptions: [String],
-  avatarUrl: String,
-  status: { type: String, enum: ['active', 'inactive'], default: 'active' },
-  createdAt: { type: Date, default: Date.now },
-});
-logisticsPartnerSchema.index({ ownerUid: 1 }, { unique: true });
-
-const LogisticsPartner = mongoose.model('LogisticsPartner', logisticsPartnerSchema, 'logistics_partners');
+// Car model extracted to src/models/Car.js (Plan 03-01) — requires at top-of-file.
+// Broker model extracted to src/models/Broker.js (Plan 03-01).
+// LogisticsPartner model extracted to src/models/LogisticsPartner.js (Plan 03-01).
+// serviceItemSchema moved with Broker + LogisticsPartner — each model file owns its own clone.
+// User model extracted to src/models/User.js (Plan 01-01).
 
 // OTP Schema
 const otpSchema = new mongoose.Schema({
