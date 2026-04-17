@@ -203,6 +203,11 @@ const serviceOrderSchema = new mongoose.Schema({
     companyName: String,
     phoneNumber: String,
     telegramUsername: String,
+    email: String,
+    firstName: String,
+    lastName: String,
+    providerRole: { type: String, enum: ['broker', 'logistics'], default: null },
+    snapshotAt: { type: Date, default: Date.now },
   },
   services: [{
     name: { type: String, required: true },
@@ -1140,10 +1145,35 @@ app.post('/api/orders', async (req, res) => {
     for (const item of items) {
       const key = `${item.providerUid}_${item.providerType}`;
       if (!providerGroups[key]) {
+        // Server-authoritative providerSnapshot per D-22/D-23. The client-supplied
+        // `item.providerSnapshot` is intentionally ignored — we resolve every field
+        // from the Broker/LogisticsPartner profile + the owner User so buyer-visible
+        // order history survives a later hard-delete of the provider profile.
+        let profile = null;
+        if (item.providerType === 'broker') {
+          profile = await Broker.findOne({ ownerUid: item.providerUid }).lean();
+        } else if (item.providerType === 'logistics') {
+          profile = await LogisticsPartner.findOne({ ownerUid: item.providerUid }).lean();
+        }
+        const ownerUser = await User.findOne({ firebaseUid: item.providerUid }).lean();
+        if (!profile || !ownerUser) {
+          console.warn(
+            `[providerSnapshot] Warning: provider ${item.providerUid} (${item.providerType}) not fully resolvable at order creation — profile=${!!profile}, user=${!!ownerUser}`
+          );
+        }
         providerGroups[key] = {
           providerUid: item.providerUid,
           providerType: item.providerType,
-          providerSnapshot: item.providerSnapshot,
+          providerSnapshot: {
+            companyName: profile?.companyName ?? null,
+            phoneNumber: profile?.phoneNumber ?? null,
+            telegramUsername: profile?.telegramUsername ?? null,
+            email: ownerUser?.email ?? null,
+            firstName: ownerUser?.firstName ?? null,
+            lastName: ownerUser?.lastName ?? null,
+            providerRole: item.providerType,
+            snapshotAt: new Date(),
+          },
           services: [],
         };
       }
@@ -1324,6 +1354,13 @@ app.use((err, req, res, next) => {
   next();
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+// Only bind the port when run directly (e.g. `node server.js`, Railway).
+// Under Jest + supertest we `require('./server.js')` and want the Express app
+// without a live listener. Production behavior is unchanged.
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+}
+
+module.exports = { app };

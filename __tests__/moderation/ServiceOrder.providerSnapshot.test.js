@@ -47,13 +47,22 @@ describe('ServiceOrder.providerSnapshot (DATA-03)', () => {
   });
 
   test('schema has all 8 expected providerSnapshot fields', () => {
-    const snapshotPath = ServiceOrder().schema.path('providerSnapshot');
-    expect(snapshotPath).toBeDefined();
-    const keys = Object.keys(snapshotPath.schema.paths);
-    expect(keys).toEqual(expect.arrayContaining([
+    // Inline nested-object schemas are stored as flat dotted paths
+    // (e.g. "providerSnapshot.companyName"). Assert every expected leaf exists.
+    const schema = ServiceOrder().schema;
+    const expected = [
       'companyName', 'phoneNumber', 'telegramUsername',
       'email', 'firstName', 'lastName', 'providerRole', 'snapshotAt',
-    ]));
+    ];
+    for (const leaf of expected) {
+      const p = schema.path(`providerSnapshot.${leaf}`);
+      expect(p).toBeDefined();
+    }
+    // providerRole must be typed as String with the broker|logistics enum.
+    const roleEnum = schema.path('providerSnapshot.providerRole').enumValues;
+    expect(roleEnum).toEqual(expect.arrayContaining(['broker', 'logistics']));
+    // snapshotAt must be a Date.
+    expect(schema.path('providerSnapshot.snapshotAt').instance).toBe('Date');
   });
 
   test('providerRole enum rejects invalid value', async () => {
