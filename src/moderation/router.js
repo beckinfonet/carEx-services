@@ -72,8 +72,15 @@ router.post('/:targetUid', denySelfModeration, async (req, res) => {
       return res.json(result);
     }
     if (parsed.data.action === 'revoke_role') {
-      // Plan 02-04 replaces this with service.revokeRole(...).
-      return res.status(501).json({ error: 'not_implemented', message: 'revoke_role lands in Plan 02-04' });
+      const result = await service.revokeRole({
+        adminUid: req.admin.uid,
+        adminEmail: req.admin.email,
+        targetUid: req.params.targetUid,
+        role: parsed.data.role,
+        reasonCategory: parsed.data.reasonCategory,
+        note: parsed.data.note,
+      });
+      return res.json(result);
     }
     // Unreachable — dispatchSchema enforces the enum.
     return res.status(400).json({ error: 'invalid_payload' });
