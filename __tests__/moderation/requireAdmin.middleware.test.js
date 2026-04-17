@@ -87,4 +87,27 @@ describe('/api/admin/moderation/ping (SEC-01 + SEC-02)', () => {
     const res = await request(app).get('/api/admin/moderation/ping').set('Authorization', 'Bearer ok-token');
     expect(res.status).toBe(200);
   });
+
+  test('req.admin.uid propagates from verified idToken uid (D-31 prerequisite)', async () => {
+    await AdminUser.create({ email: 'admin@test.local', role: 'admin' });
+    admin.__verifyIdTokenMock.mockResolvedValueOnce({ uid: 'admin-uid-from-token', email: 'admin@test.local' });
+
+    // Replace the /ping handler with a spy that returns the observed req.admin shape.
+    const spyApp = express();
+    spyApp.use(express.json());
+    spyApp.get('/api/admin/moderation/spy', verifyIdToken, requireAdmin, (req, res) => {
+      res.json({ admin: req.admin });
+    });
+
+    const res = await request(spyApp)
+      .get('/api/admin/moderation/spy')
+      .set('Authorization', 'Bearer ok-token');
+
+    expect(res.status).toBe(200);
+    expect(res.body.admin).toEqual({
+      uid: 'admin-uid-from-token',
+      role: 'admin',
+      email: 'admin@test.local',
+    });
+  });
 });
