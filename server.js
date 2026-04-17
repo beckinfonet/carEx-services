@@ -1,13 +1,13 @@
+const dotenv = require('dotenv');
+dotenv.config();
+
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
-const dotenv = require('dotenv');
 const { S3Client } = require('@aws-sdk/client-s3');
 const multer = require('multer');
 const multerS3 = require('multer-s3');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
-
-dotenv.config();
 
 const User = require('./src/models/User');
 const AdminUser = require('./src/models/AdminUser');
