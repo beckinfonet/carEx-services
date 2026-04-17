@@ -701,7 +701,13 @@ app.post('/api/cars', attachAuthIfPresent, requireNotSuspended('create_listing')
     let isUnique = false;
     while (!isUnique) {
       listingId = `${Math.floor(100 + Math.random() * 900)}-${Math.floor(100 + Math.random() * 900)}`;
-      const existing = await Car.findOne({ listingId });
+      // WR-01 fix: uniqueness checks must see the full corpus including hidden
+      // listings. Without includeAllUsers, a suspended seller's listing with
+      // the same listingId is invisible to the hook and this loop falsely
+      // reports "unique", producing a duplicate that becomes visible after
+      // unsuspend. Deep links (listing/:carId) surface listingIds, so a
+      // collision would silently route to the wrong car post-unsuspend.
+      const existing = await Car.findOne({ listingId }).setOptions({ includeAllUsers: true });
       if (!existing) isUnique = true;
     }
 
