@@ -17,7 +17,7 @@
 const express = require('express');
 const service = require('./service');
 const { denySelfModeration } = require('./denySelfModeration');
-const { dispatchSchema, unsuspendSchema } = require('./schemas');
+const { dispatchSchema, unsuspendSchema, deleteProfileSchema, editProfileSchema } = require('./schemas');
 
 const router = express.Router();
 
@@ -39,7 +39,13 @@ const KNOWN_USER_ERRORS = new Set([
 
 function handleServiceError(err, res, tag) {
   if (KNOWN_USER_ERRORS.has(err.message)) {
-    return res.status(400).json({ error: err.message });
+    const body = { error: err.message };
+    // D-05 enrichment: when service throws invalid_field with err.fields attached,
+    // surface the offending field names so the mobile UI (Phase 5) can name them.
+    if (err.message === 'invalid_field' && Array.isArray(err.fields)) {
+      body.fields = err.fields;
+    }
+    return res.status(400).json(body);
   }
   // eslint-disable-next-line no-console
   console.error(`[moderation] ${tag} error:`, err);
@@ -107,6 +113,70 @@ router.patch('/:targetUid/unsuspend', denySelfModeration, async (req, res) => {
     return res.json(result);
   } catch (err) {
     return handleServiceError(err, res, 'unsuspend');
+  }
+});
+
+// DELETE /:targetUid/provider-profile — hard-delete Broker or LogisticsPartner doc
+// + strip User.{role}Status='NONE' inside one transaction (Plan 02-05, ADMIN-04).
+// Body: { role: 'broker'|'logistics', reasonCategory, note? }. Zod's
+// roleEnumProfileDeletable rejects role=seller at parse-time (D-14); service layer also
+// throws invalid_role_for_delete defensively. Past orders survive via providerSnapshot
+// (D-15) — service NEVER touches service_orders.
+router.delete('/:targetUid/provider-profile', denySelfModeration, async (req, res) => {
+  const parsed = deleteProfileSchema.safeParse(req.body || {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'invalid_payload', issues: parsed.error.issues });
+  }
+  try {
+    const result = await service.deleteProviderProfile({
+      adminUid: req.admin.uid,
+      adminEmail: req.admin.email,
+      targetUid: req.params.targetUid,
+      role: parsed.data.role,
+      reasonCategory: parsed.data.reasonCategory,
+      note: parsed.data.note,
+    });
+    return res.json(result);
+  } catch (err) {
+    return handleServiceError(err, res, 'deleteProviderProfile');
+  }
+});
+
+// POST /:targetUid/edit-profile — whitelist-filtered profile edit with fieldDiff audit
+// (Plan 02-05, ADMIN-05, D-03..D-07). Body: { role, fields: {...}, note? }.
+// Two failure modes for unknown fields surface as the SAME 400 envelope (D-05):
+//   - Zod .strict() rejects at parse-time → unrecognized_keys issue → invalid_field
+//   - Service-layer defensive whitelist throws invalid_field with err.fields attached
+// Both paths return { error: 'invalid_field', fields: [...] } so the Phase 5 mobile UI
+// can render a single error path.
+router.post('/:targetUid/edit-profile', denySelfModeration, async (req, res) => {
+  const parsed = editProfileSchema.safeParse(req.body || {});
+  if (!parsed.success) {
+    // Zod .strict() surfaces unknown keys via the 'unrecognized_keys' issue code on the
+    // .fields object. Convert to the D-05 invalid_field shape so router-layer rejection
+    // is identical to service-layer rejection (mobile UI gets one error path).
+    const issues = parsed.error.issues;
+    const unknownIssue = issues.find((i) => i.code === 'unrecognized_keys');
+    if (unknownIssue) {
+      return res.status(400).json({
+        error: 'invalid_field',
+        fields: unknownIssue.keys || [],
+      });
+    }
+    return res.status(400).json({ error: 'invalid_payload', issues });
+  }
+  try {
+    const result = await service.editProfile({
+      adminUid: req.admin.uid,
+      adminEmail: req.admin.email,
+      targetUid: req.params.targetUid,
+      role: parsed.data.role,
+      fields: parsed.data.fields,
+      note: parsed.data.note,
+    });
+    return res.json(result);
+  } catch (err) {
+    return handleServiceError(err, res, 'editProfile');
   }
 });
 
