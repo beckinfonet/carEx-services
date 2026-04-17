@@ -157,6 +157,74 @@ describe('Car pre(/^find/) hide-hook matrix (ROADMAP Criterion #2 — Car)', () 
     const found = await Car.findById(car._id);  // no bypass
     expect(found).toBeNull();
   });
+
+  // --------------------------------------------------------------------------
+  // CR-01 regression — caller's sellerId filter must NOT be clobbered by the
+  // hide hook. The previous spread-overwrite pattern returned *all* non-hidden
+  // cars for GET /api/cars?sellerId=X (my-listings view). The $and-merge fix
+  // must preserve the caller's sellerId constraint AND apply the $nin hide.
+  // --------------------------------------------------------------------------
+  test('CR-01: Car.find({ sellerId: X }) returns only X\'s cars when X is active (caller filter survives hide hook)', async () => {
+    // Seed the primary active seller + their car.
+    await seedActiveSellerWithCar();
+
+    // Seed a SECOND active seller + car that must NOT leak into the filtered find.
+    const OTHER_UID = 'seller-car-other';
+    await User.create({
+      firebaseUid: OTHER_UID,
+      email: 'other@test.local',
+      sellerStatus: 'APPROVED',
+      moderationStatus: { state: 'active', severity: 'none' },
+    });
+    await Car.create({
+      sellerId: OTHER_UID,
+      makeName: 'Honda',
+      modelName: 'Civic',
+      year: 2019,
+      price: 14000,
+      listingStatus: 'active',
+    });
+
+    // Sanity: unfiltered returns both.
+    expect(await Car.find({})).toHaveLength(2);
+
+    // Filtered by SELLER_UID must return exactly 1 — SELLER_UID's car only.
+    const mine = await Car.find({ sellerId: SELLER_UID });
+    expect(mine).toHaveLength(1);
+    expect(mine[0].sellerId).toBe(SELLER_UID);
+  });
+
+  test('CR-01: Car.find({ sellerId: X }) returns [] when X is hidden (caller filter + hide both applied)', async () => {
+    await seedActiveSellerWithCar();
+
+    // Seed an OTHER active seller with a car. Without the fix, a broken
+    // hook that clobbered the caller's sellerId would return this car too.
+    const OTHER_UID = 'seller-car-other-2';
+    await User.create({
+      firebaseUid: OTHER_UID,
+      email: 'other2@test.local',
+      sellerStatus: 'APPROVED',
+      moderationStatus: { state: 'active', severity: 'none' },
+    });
+    await Car.create({
+      sellerId: OTHER_UID,
+      makeName: 'Mazda',
+      modelName: '3',
+      year: 2018,
+      price: 11000,
+      listingStatus: 'active',
+    });
+
+    // Hide SELLER_UID.
+    await User.updateOne(
+      { firebaseUid: SELLER_UID },
+      { $set: { 'moderationStatus.state': 'blocked_with_review' } }
+    );
+
+    // Filtered find on the hidden owner must return [] — NOT leak other seller's car.
+    const result = await Car.find({ sellerId: SELLER_UID });
+    expect(result).toHaveLength(0);
+  });
 });
 
 // ============================================================================
@@ -256,6 +324,69 @@ describe('Broker pre(/^find/) hide-hook matrix (ROADMAP Criterion #2 — Broker)
     const found = await Broker.findOne({ ownerUid: OWNER_UID });
     expect(found).toBeNull();
   });
+
+  // --------------------------------------------------------------------------
+  // CR-01 regression — Broker.findOne({ ownerUid: uid }) must not be clobbered.
+  // Pre-fix: hook overwrote caller's ownerUid filter, so the call returned an
+  // arbitrary non-hidden broker (wrong UID) instead of the requested one (or
+  // null). The $and-merge fix must keep caller's ownerUid AND apply the hide.
+  // --------------------------------------------------------------------------
+  test('CR-01: Broker.findOne({ ownerUid: X }) returns X\'s broker when active (and does not leak other brokers)', async () => {
+    await seedActiveBroker();
+
+    // Seed a SECOND active broker with a different ownerUid.
+    const OTHER_UID = 'owner-broker-other';
+    await User.create({
+      firebaseUid: OTHER_UID,
+      email: 'broker-other@test.local',
+      brokerStatus: 'APPROVED',
+      moderationStatus: { state: 'active', severity: 'none' },
+    });
+    await Broker.create({
+      ownerUid: OTHER_UID,
+      companyName: 'Zeta Brokers',
+      phoneNumber: '+10000099',
+      status: 'active',
+    });
+
+    // Sanity: unfiltered find returns both.
+    expect(await Broker.find({})).toHaveLength(2);
+
+    // Filtered by OWNER_UID must return exactly that one — not the other.
+    const one = await Broker.findOne({ ownerUid: OWNER_UID });
+    expect(one).not.toBeNull();
+    expect(one.ownerUid).toBe(OWNER_UID);
+    expect(one.companyName).toBe('Acme Brokers');
+  });
+
+  test('CR-01: Broker.findOne({ ownerUid: X }) returns null when X is hidden (does not leak a different non-hidden broker)', async () => {
+    await seedActiveBroker();
+
+    // Seed a SECOND active broker. Without the fix, the clobbered-filter would
+    // return THIS broker (wrong UID) for the query below.
+    const OTHER_UID = 'owner-broker-other-2';
+    await User.create({
+      firebaseUid: OTHER_UID,
+      email: 'broker-other2@test.local',
+      brokerStatus: 'APPROVED',
+      moderationStatus: { state: 'active', severity: 'none' },
+    });
+    await Broker.create({
+      ownerUid: OTHER_UID,
+      companyName: 'Omega Brokers',
+      phoneNumber: '+10000100',
+      status: 'active',
+    });
+
+    // Hide OWNER_UID.
+    await User.updateOne(
+      { firebaseUid: OWNER_UID },
+      { $set: { 'moderationStatus.state': 'blocked_with_review' } }
+    );
+
+    const result = await Broker.findOne({ ownerUid: OWNER_UID });
+    expect(result).toBeNull();
+  });
 });
 
 // ============================================================================
@@ -342,5 +473,61 @@ describe('LogisticsPartner pre(/^find/) hide-hook matrix (ROADMAP Criterion #2 �
     const bypassed = await LogisticsPartner.find({}).setOptions({ includeAllUsers: true });
     expect(bypassed).toHaveLength(1);
     expect(bypassed[0].ownerUid).toBe(OWNER_UID);
+  });
+
+  // --------------------------------------------------------------------------
+  // CR-01 regression — LogisticsPartner.findOne({ ownerUid: uid }) must not be
+  // clobbered. The $and-merge fix must keep caller's ownerUid AND apply the
+  // hide $nin clause so GET /api/logistics/:uid returns the correct doc.
+  // --------------------------------------------------------------------------
+  test('CR-01: LogisticsPartner.findOne({ ownerUid: X }) returns X\'s partner when active', async () => {
+    await seedActiveLogistics();
+
+    const OTHER_UID = 'owner-logistics-other';
+    await User.create({
+      firebaseUid: OTHER_UID,
+      email: 'logi-other@test.local',
+      logisticsStatus: 'APPROVED',
+      moderationStatus: { state: 'active', severity: 'none' },
+    });
+    await LogisticsPartner.create({
+      ownerUid: OTHER_UID,
+      companyName: 'Slow Haul',
+      phoneNumber: '+10000201',
+      status: 'active',
+    });
+
+    expect(await LogisticsPartner.find({})).toHaveLength(2);
+
+    const one = await LogisticsPartner.findOne({ ownerUid: OWNER_UID });
+    expect(one).not.toBeNull();
+    expect(one.ownerUid).toBe(OWNER_UID);
+    expect(one.companyName).toBe('Fast Haul');
+  });
+
+  test('CR-01: LogisticsPartner.findOne({ ownerUid: X }) returns null when X is hidden (no leak)', async () => {
+    await seedActiveLogistics();
+
+    const OTHER_UID = 'owner-logistics-other-2';
+    await User.create({
+      firebaseUid: OTHER_UID,
+      email: 'logi-other2@test.local',
+      logisticsStatus: 'APPROVED',
+      moderationStatus: { state: 'active', severity: 'none' },
+    });
+    await LogisticsPartner.create({
+      ownerUid: OTHER_UID,
+      companyName: 'Medium Haul',
+      phoneNumber: '+10000202',
+      status: 'active',
+    });
+
+    await User.updateOne(
+      { firebaseUid: OWNER_UID },
+      { $set: { 'moderationStatus.state': 'blocked_with_review' } }
+    );
+
+    const result = await LogisticsPartner.findOne({ ownerUid: OWNER_UID });
+    expect(result).toBeNull();
   });
 });

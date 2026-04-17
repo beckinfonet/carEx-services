@@ -56,7 +56,29 @@ carSchema.pre(/^find/, async function () {
       { sellerStatus: { $ne: 'APPROVED' } },
     ],
   });
-  this.setQuery({ ...this.getQuery(), sellerId: { $nin: hiddenUids } });
+  // CR-01 fix: preserve the caller's filter on the join key (sellerId) by
+  // AND-ing the $nin hide clause with any existing sellerId condition.
+  // The previous object-literal spread pattern
+  //   { ...this.getQuery(), sellerId: { $nin: hiddenUids } }
+  // silently clobbered caller filters like { sellerId: 'uid-X' } because
+  // duplicate keys resolve "last wins" in JS. That broke
+  // GET /api/cars?sellerId=X (my-listings view).
+  const currentQuery = this.getQuery();
+  const existingClause = currentQuery.sellerId;
+  const nextQuery = { ...currentQuery };
+  if (existingClause === undefined) {
+    nextQuery.sellerId = { $nin: hiddenUids };
+  } else {
+    // Preserve caller's sellerId filter AND apply the hide $nin via $and so
+    // neither clause clobbers the other.
+    delete nextQuery.sellerId;
+    nextQuery.$and = [
+      ...(currentQuery.$and || []),
+      { sellerId: existingClause },
+      { sellerId: { $nin: hiddenUids } },
+    ];
+  }
+  this.setQuery(nextQuery);
 });
 
 module.exports = mongoose.model('Car', carSchema);

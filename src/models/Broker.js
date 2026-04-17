@@ -42,7 +42,27 @@ brokerSchema.pre(/^find/, async function () {
       { brokerStatus: { $ne: 'APPROVED' } },
     ],
   });
-  this.setQuery({ ...this.getQuery(), ownerUid: { $nin: hiddenUids } });
+  // CR-01 fix: preserve the caller's filter on the join key (ownerUid) by
+  // AND-ing the $nin hide clause with any existing ownerUid condition.
+  // The previous object-literal spread pattern
+  //   { ...this.getQuery(), ownerUid: { $nin: hiddenUids } }
+  // silently clobbered caller filters like { ownerUid: 'uid-X' } because
+  // duplicate keys resolve "last wins" in JS. That broke
+  // GET /api/brokers/:uid (Broker.findOne({ ownerUid: uid })).
+  const currentQuery = this.getQuery();
+  const existingClause = currentQuery.ownerUid;
+  const nextQuery = { ...currentQuery };
+  if (existingClause === undefined) {
+    nextQuery.ownerUid = { $nin: hiddenUids };
+  } else {
+    delete nextQuery.ownerUid;
+    nextQuery.$and = [
+      ...(currentQuery.$and || []),
+      { ownerUid: existingClause },
+      { ownerUid: { $nin: hiddenUids } },
+    ];
+  }
+  this.setQuery(nextQuery);
 });
 
 module.exports = mongoose.model('Broker', brokerSchema, 'brokers');
