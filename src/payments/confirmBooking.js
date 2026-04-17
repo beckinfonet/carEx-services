@@ -127,6 +127,22 @@ async function confirmBooking({ stripe, paymentIntentId, carId, buyerUid, items 
       // Stripe refunds are NOT in the Mongo transaction. Refund first, throw second.
       // Reversed order risks "buyer charged, no order, no refund" on Stripe API failure.
 
+      // WR-04 fix: rebuild a LOCAL copy of the group list on each transaction
+      // attempt. session.withTransaction auto-retries on transient errors
+      // (D-13 / D-23); if we mutate the outer providerGroups array in place,
+      // retries see stale providerSnapshot / drifted snapshotAt timestamps,
+      // and any future additive mutation (push vs wholesale reassign) would
+      // accumulate data across retries. Cloning makes each attempt
+      // self-contained.
+      const localGroups = providerGroups.map((g) => ({
+        providerUid: g.providerUid,
+        providerType: g.providerType,
+        services: g.services,
+      }));
+      // Reset per-attempt mutable accumulators so retries do not carry over
+      // orders created on a prior (rolled-back) attempt.
+      savedOrders.length = 0;
+
       // ---- a. Buyer re-check (D-14) --------------------------------------
       const buyer = await User.findOne({ firebaseUid: buyerUid })
         .setOptions({ includeAllUsers: true })
@@ -137,7 +153,7 @@ async function confirmBooking({ stripe, paymentIntentId, carId, buyerUid, items 
       }
 
       // ---- b. Provider re-check + providerSnapshot build -----------------
-      for (const group of providerGroups) {
+      for (const group of localGroups) {
         const providerUser = await User.findOne({ firebaseUid: group.providerUid })
           .setOptions({ includeAllUsers: true })
           .session(session)
@@ -210,7 +226,7 @@ async function confirmBooking({ stripe, paymentIntentId, carId, buyerUid, items 
         listingId: car.listingId,
       };
 
-      for (const group of providerGroups) {
+      for (const group of localGroups) {
         let totalAmount = 0;
         let totalCurrency = '$';
         for (const svc of group.services) {
