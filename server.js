@@ -9,6 +9,9 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 dotenv.config();
 
+const User = require('./src/models/User');
+const AdminUser = require('./src/models/AdminUser');
+
 const app = express();
 const PORT = process.env.PORT || 5001;
 
@@ -124,26 +127,7 @@ const carSchema = new mongoose.Schema({
 
 const Car = mongoose.model('Car', carSchema);
 
-// User Schema
-const userSchema = new mongoose.Schema({
-  firebaseUid: { type: String, required: true, unique: true },
-  email: { type: String, required: true },
-  firstName: String,
-  lastName: String,
-  phoneNumber: String,
-  telegramUsername: String,
-  avatarUrl: String,
-  sellerStatus: { type: String, enum: ['NONE', 'PENDING', 'APPROVED', 'REJECTED'], default: 'NONE' },
-  sellerRequestDate: Date,
-  brokerStatus: { type: String, enum: ['NONE', 'PENDING', 'APPROVED', 'REJECTED'], default: 'NONE' },
-  brokerRequestDate: Date,
-  logisticsStatus: { type: String, enum: ['NONE', 'PENDING', 'APPROVED', 'REJECTED'], default: 'NONE' },
-  logisticsRequestDate: Date,
-  isPhoneVerified: { type: Boolean, default: false },
-  createdAt: { type: Date, default: Date.now },
-});
-
-const User = mongoose.model('User', userSchema);
+// User model extracted to src/models/User.js (Plan 01-01)
 
 // Service item sub-schema (shared by broker and logistics)
 const serviceItemSchema = new mongoose.Schema({
@@ -197,14 +181,7 @@ const otpSchema = new mongoose.Schema({
 });
 const OTP = mongoose.model('OTP', otpSchema);
 
-// Admin User Schema
-const adminUserSchema = new mongoose.Schema({
-  email: { type: String, required: true, unique: true },
-  role: { type: String, enum: ['superadmin', 'admin'], default: 'admin' },
-  createdAt: { type: Date, default: Date.now },
-});
-adminUserSchema.index({ email: 1 }, { unique: true });
-const AdminUser = mongoose.model('AdminUser', adminUserSchema, 'admin_users');
+// AdminUser model extracted to src/models/AdminUser.js (Plan 01-01)
 
 // Service Order Schema
 const serviceOrderSchema = new mongoose.Schema({
