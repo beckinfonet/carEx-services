@@ -15,7 +15,7 @@ async function requireAdmin(req, res, next) {
   if (!admin) {
     return res.status(403).json({ error: 'unauthorized', message: 'Admin access required' });
   }
-  req.admin = { role: admin.role, email: admin.email };
+  req.admin = { uid: req.auth.uid, role: admin.role, email: admin.email };
   return next();
 }
 

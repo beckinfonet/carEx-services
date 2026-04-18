@@ -11,10 +11,16 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 const User = require('./src/models/User');
 const AdminUser = require('./src/models/AdminUser');
+const Car = require('./src/models/Car');
+const Broker = require('./src/models/Broker');
+const LogisticsPartner = require('./src/models/LogisticsPartner');
 const { verifyIdToken } = require('./src/security/verifyIdToken');
 const { requireAdmin } = require('./src/security/requireAdmin');
+const { attachAuthIfPresent } = require('./src/security/attachAuthIfPresent');
+const { requireNotSuspended } = require('./src/security/requireNotSuspended');
 const { ensureBaseline } = require('./src/security/ensureBaseline');
 const moderationRouter = require('./src/moderation/router');
+const { confirmBooking: confirmBookingService, ProviderSuspendedError } = require('./src/payments/confirmBooking');
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -91,92 +97,11 @@ vehicleModelSchema.index({ makeId: 1, slug: 1 }, { unique: true });
 const VehicleMake = mongoose.model('VehicleMake', vehicleMakeSchema, 'vehicle_makes');
 const VehicleModel = mongoose.model('VehicleModel', vehicleModelSchema, 'vehicle_models');
 
-// Car Schema (listings reference makeId/modelId)
-const carSchema = new mongoose.Schema({
-  makeId: { type: mongoose.Schema.Types.ObjectId, ref: 'VehicleMake' },
-  modelId: { type: mongoose.Schema.Types.ObjectId, ref: 'VehicleModel' },
-  makeName: String,
-  modelName: String,
-  make: String,  // legacy, for old listings
-  model: String, // legacy, for old listings
-  trimLevel: String,
-  wheelbase: String,
-  year: Number,
-  price: Number,
-  mileage: Number,
-  fuel: String,
-  currency: String,
-  description: String,
-  bodyType: String,
-  imageUrls: [String],
-  createdAt: { type: Date, default: Date.now },
-  engine: String,
-  transmission: String,
-  drivetrain: String,
-  mpg: String,
-  condition: String,
-  knownIssues: [String],
-  exteriorColor: String,
-  interiorColor: String,
-  interiorMaterial: String,
-  seats: Number,
-  doors: Number,
-  phoneNumber: String,
-  telegramUsername: String,
-  listingId: String,
-  sellerId: String, // Firebase UID of listing owner
-  listingStatus: { type: String, enum: ['active', 'booked', 'sold'], default: 'active' },
-  bookedByUid: { type: String, default: null },
-  stripePaymentIntentId: { type: String, default: null },
-});
-
-const Car = mongoose.model('Car', carSchema);
-
-// User model extracted to src/models/User.js (Plan 01-01)
-
-// Service item sub-schema (shared by broker and logistics)
-const serviceItemSchema = new mongoose.Schema({
-  name: { type: String, required: true },
-  description: { type: String, default: '' },
-  fee: { type: mongoose.Schema.Types.Mixed, default: 0 },
-  currency: { type: String, default: '$' },
-}, { _id: false });
-
-// Broker Schema
-const brokerSchema = new mongoose.Schema({
-  ownerUid: { type: String, required: true, unique: true },
-  companyName: { type: String, required: true },
-  description: String,
-  phoneNumber: String,
-  telegramUsername: String,
-  services: [serviceItemSchema],
-  paymentOptions: [String],
-  avatarUrl: String,
-  status: { type: String, enum: ['active', 'inactive'], default: 'active' },
-  createdAt: { type: Date, default: Date.now },
-});
-brokerSchema.index({ ownerUid: 1 }, { unique: true });
-
-const Broker = mongoose.model('Broker', brokerSchema, 'brokers');
-
-// Logistics Partner Schema
-const logisticsPartnerSchema = new mongoose.Schema({
-  ownerUid: { type: String, required: true, unique: true },
-  companyName: { type: String, required: true },
-  description: String,
-  phoneNumber: String,
-  telegramUsername: String,
-  services: [serviceItemSchema],
-  coverageAreas: [String],
-  timelines: String,
-  paymentOptions: [String],
-  avatarUrl: String,
-  status: { type: String, enum: ['active', 'inactive'], default: 'active' },
-  createdAt: { type: Date, default: Date.now },
-});
-logisticsPartnerSchema.index({ ownerUid: 1 }, { unique: true });
-
-const LogisticsPartner = mongoose.model('LogisticsPartner', logisticsPartnerSchema, 'logistics_partners');
+// Car model extracted to src/models/Car.js (Plan 03-01) — requires at top-of-file.
+// Broker model extracted to src/models/Broker.js (Plan 03-01).
+// LogisticsPartner model extracted to src/models/LogisticsPartner.js (Plan 03-01).
+// serviceItemSchema moved with Broker + LogisticsPartner — each model file owns its own clone.
+// User model extracted to src/models/User.js (Plan 01-01).
 
 // OTP Schema
 const otpSchema = new mongoose.Schema({
@@ -587,7 +512,7 @@ app.get('/api/brokers/:uid', async (req, res) => {
   }
 });
 
-app.put('/api/brokers/:uid', async (req, res) => {
+app.put('/api/brokers/:uid', attachAuthIfPresent, requireNotSuspended('update_profile'), async (req, res) => {
   try {
     const { companyName, description, phoneNumber, telegramUsername, services, paymentOptions } = req.body;
     const update = {};
@@ -642,7 +567,7 @@ app.get('/api/logistics/:uid', async (req, res) => {
   }
 });
 
-app.put('/api/logistics/:uid', async (req, res) => {
+app.put('/api/logistics/:uid', attachAuthIfPresent, requireNotSuspended('update_profile'), async (req, res) => {
   try {
     const { companyName, description, phoneNumber, telegramUsername, services, coverageAreas, timelines, paymentOptions } = req.body;
     const update = {};
@@ -737,7 +662,7 @@ app.post('/api/otp/verify', async (req, res) => {
 });
 
 // Upload and create car (validate makeId/modelId)
-app.post('/api/cars', upload.array('images', 25), async (req, res) => {
+app.post('/api/cars', attachAuthIfPresent, requireNotSuspended('create_listing'), upload.array('images', 25), async (req, res) => {
   try {
     const {
       makeId, modelId, trimLevel, wheelbase, year, price, mileage, fuel, currency, description, bodyType,
@@ -776,7 +701,13 @@ app.post('/api/cars', upload.array('images', 25), async (req, res) => {
     let isUnique = false;
     while (!isUnique) {
       listingId = `${Math.floor(100 + Math.random() * 900)}-${Math.floor(100 + Math.random() * 900)}`;
-      const existing = await Car.findOne({ listingId });
+      // WR-01 fix: uniqueness checks must see the full corpus including hidden
+      // listings. Without includeAllUsers, a suspended seller's listing with
+      // the same listingId is invisible to the hook and this loop falsely
+      // reports "unique", producing a duplicate that becomes visible after
+      // unsuspend. Deep links (listing/:carId) surface listingIds, so a
+      // collision would silently route to the wrong car post-unsuspend.
+      const existing = await Car.findOne({ listingId }).setOptions({ includeAllUsers: true });
       if (!existing) isUnique = true;
     }
 
@@ -1084,7 +1015,7 @@ app.get('/api/payments/config', (req, res) => {
   res.json({ publishableKey: process.env.STRIPE_PUBLISHABLE_KEY });
 });
 
-app.post('/api/payments/create-payment-intent', async (req, res) => {
+app.post('/api/payments/create-payment-intent', attachAuthIfPresent, requireNotSuspended('create_order'), async (req, res) => {
   try {
     const { currency = 'kgs', carId, buyerUid } = req.body;
     if (!buyerUid) return res.status(400).json({ message: 'buyerUid required' });
@@ -1110,136 +1041,59 @@ app.post('/api/payments/create-payment-intent', async (req, res) => {
   }
 });
 
-app.post('/api/payments/confirm-booking', async (req, res) => {
+// Thin delegation to the transactional confirm-booking service (Plan 03-04).
+// All Stripe + buyer/provider/seller re-check + car flip + ServiceOrder creation
+// lives in src/payments/confirmBooking.js so the TOCTOU gap between
+// create-payment-intent and confirm-booking is closed inside a single
+// session.withTransaction(). This handler only routes errors to HTTP codes.
+app.post('/api/payments/confirm-booking', attachAuthIfPresent, requireNotSuspended('create_order'), async (req, res) => {
+  const { paymentIntentId, carId, buyerUid, items = [] } = req.body || {};
   try {
-    const { paymentIntentId, carId, buyerUid } = req.body;
-    if (!paymentIntentId || !carId || !buyerUid) {
-      return res.status(400).json({ message: 'paymentIntentId, carId, and buyerUid required' });
-    }
-
-    const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
-    if (paymentIntent.status !== 'succeeded') {
-      return res.status(400).json({ message: `Payment not completed (status: ${paymentIntent.status})` });
-    }
-
-    const car = await Car.findById(carId);
-    if (!car) return res.status(404).json({ message: 'Car not found' });
-
-    car.listingStatus = 'booked';
-    car.bookedByUid = buyerUid;
-    car.stripePaymentIntentId = paymentIntentId;
-    await car.save();
-
-    res.json({
-      ...car.toObject(),
-      id: car._id.toString(),
-      make: car.makeName || car.make || '',
-      model: car.modelName || car.model || '',
+    const result = await confirmBookingService({
+      stripe,
+      paymentIntentId,
+      carId,
+      buyerUid,
+      items,
     });
-  } catch (error) {
-    console.error('Confirm booking error:', error);
-    res.status(500).json({ message: error.message });
+    return res.json(result);
+  } catch (err) {
+    if (err instanceof ProviderSuspendedError) {
+      return res.status(409).json({
+        error: 'provider_suspended',
+        providerUid: err.providerUid,
+        refundId: err.refundId,
+        refundFailed: err.refundFailed,
+      });
+    }
+    if (err && (err.code === 'invalid_payment_intent' || err.message === 'invalid_payment_intent')) {
+      return res.status(400).json({
+        error: 'invalid_payment_intent',
+        message: 'PaymentIntent is not succeeded',
+      });
+    }
+    if (err && err.message === 'car_not_found') {
+      return res.status(404).json({ error: 'car_not_found' });
+    }
+    // eslint-disable-next-line no-console
+    console.error('[confirm-booking]', err);
+    return res.status(500).json({ error: 'internal_error' });
   }
 });
 
 // --- Service Order Routes ---
 
-// Create orders from cart (one order per provider)
-app.post('/api/orders', async (req, res) => {
-  try {
-    const { buyerUid, car, items } = req.body;
-    if (!buyerUid || !items || !items.length) {
-      return res.status(400).json({ message: 'buyerUid and items required' });
-    }
-
-    const providerGroups = {};
-    for (const item of items) {
-      const key = `${item.providerUid}_${item.providerType}`;
-      if (!providerGroups[key]) {
-        // Server-authoritative providerSnapshot per D-22/D-23. The client-supplied
-        // `item.providerSnapshot` is intentionally ignored — we resolve every field
-        // from the Broker/LogisticsPartner profile + the owner User so buyer-visible
-        // order history survives a later hard-delete of the provider profile.
-        let profile = null;
-        if (item.providerType === 'broker') {
-          profile = await Broker.findOne({ ownerUid: item.providerUid }).lean();
-        } else if (item.providerType === 'logistics') {
-          profile = await LogisticsPartner.findOne({ ownerUid: item.providerUid }).lean();
-        }
-        const ownerUser = await User.findOne({ firebaseUid: item.providerUid }).lean();
-        if (!profile || !ownerUser) {
-          console.warn(
-            `[providerSnapshot] Warning: provider ${item.providerUid} (${item.providerType}) not fully resolvable at order creation — profile=${!!profile}, user=${!!ownerUser}`
-          );
-        }
-        providerGroups[key] = {
-          providerUid: item.providerUid,
-          providerType: item.providerType,
-          providerSnapshot: {
-            companyName: profile?.companyName ?? null,
-            phoneNumber: profile?.phoneNumber ?? null,
-            telegramUsername: profile?.telegramUsername ?? null,
-            email: ownerUser?.email ?? null,
-            firstName: ownerUser?.firstName ?? null,
-            lastName: ownerUser?.lastName ?? null,
-            providerRole: item.providerType,
-            snapshotAt: new Date(),
-          },
-          services: [],
-        };
-      }
-      providerGroups[key].services.push(item.service);
-    }
-
-    const orders = [];
-    for (const group of Object.values(providerGroups)) {
-      let totalAmount = 0;
-      let totalCurrency = '$';
-      for (const svc of group.services) {
-        const fee = parseFloat(svc.fee);
-        if (!isNaN(fee)) {
-          totalAmount += fee;
-          if (svc.currency) totalCurrency = svc.currency;
-        }
-      }
-
-      let orderNumber;
-      let isUnique = false;
-      while (!isUnique) {
-        orderNumber = generateOrderNumber();
-        const existing = await ServiceOrder.findOne({ orderNumber });
-        if (!existing) isUnique = true;
-      }
-
-      const order = await ServiceOrder.create({
-        orderNumber,
-        buyerUid,
-        carId: car?.id || null,
-        carSnapshot: car ? {
-          makeName: car.makeName,
-          modelName: car.modelName,
-          year: car.year,
-          price: car.price,
-          currency: car.currency,
-          imageUrl: car.imageUrl,
-          listingId: car.listingId,
-        } : null,
-        providerUid: group.providerUid,
-        providerType: group.providerType,
-        providerSnapshot: group.providerSnapshot,
-        services: group.services,
-        totalAmount,
-        totalCurrency,
-        buyerNote: req.body.buyerNote || '',
-      });
-      orders.push({ ...order.toObject(), id: order._id.toString() });
-    }
-
-    res.status(201).json({ orders });
-  } catch (error) {
-    console.error('Create orders error:', error);
-    res.status(500).json({ message: error.message });
-  }
+// POST /api/orders is DEPRECATED as of Phase 3 — order creation is absorbed into
+// POST /api/payments/confirm-booking which wraps PI verify + buyer/provider/seller
+// moderation re-check + car.listingStatus flip + ServiceOrder create in one Mongo
+// transaction. Standalone POST /api/orders used to permit a TOCTOU race where a
+// provider could be suspended between confirm-booking and order creation.
+// TODO: route removal after mobile retires the call + grace period (see 03-CONTEXT.md Deferred).
+app.post('/api/orders', (req, res) => {
+  res.status(410).json({
+    error: 'deprecated',
+    message: 'Use POST /api/payments/confirm-booking which now creates orders atomically',
+  });
 });
 
 // Get orders for buyer
