@@ -1006,6 +1006,13 @@ app.delete('/api/admin/users/:adminId', async (req, res) => {
   }
 });
 
+// Plan 05-0b — new admin read router (GET /users/search). Mounted AFTER the
+// inline /api/admin/* routes above so pre-existing endpoints (which predate
+// the auth-first convention) keep their current behavior; only routes inside
+// the new router run behind verifyIdToken + requireAdmin.
+const adminRouter = require('./src/admin/router');
+app.use('/api/admin', adminRouter);
+
 // --- Stripe Payment Routes ---
 
 const BOOKING_FEE_KGS = 500000; // 5 000 KGS in tiyin (smallest unit)
