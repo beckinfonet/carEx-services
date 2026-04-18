@@ -16,9 +16,33 @@
 
 const express = require('express');
 const service = require('./service');
+const ModerationAction = require('../models/ModerationAction');
 const { denySelfModeration } = require('./denySelfModeration');
 const { moderationRateLimiter } = require('./rateLimit');
 const { dispatchSchema, unsuspendSchema, deleteProfileSchema, editProfileSchema } = require('./schemas');
+
+// Plan 05-0a: cursor helpers for GET /:targetUid/history pagination.
+// Base64-wrapped JSON of (createdAt ISO, _id hex) — deterministic tiebreak for
+// the history sort order, opaque to the mobile client.
+function encodeCursor(item) {
+  if (!item) return null;
+  return Buffer.from(
+    JSON.stringify({ createdAt: item.createdAt.toISOString(), _id: item._id.toString() }),
+    'utf8',
+  ).toString('base64');
+}
+
+function decodeCursor(cursor) {
+  if (!cursor) return null;
+  try {
+    const json = Buffer.from(cursor, 'base64').toString('utf8');
+    const parsed = JSON.parse(json);
+    if (!parsed.createdAt || !parsed._id) throw new Error('missing fields');
+    return { createdAt: new Date(parsed.createdAt), _id: parsed._id };
+  } catch (_err) {
+    return undefined; // sentinel — caller emits 400 invalid_cursor
+  }
+}
 
 const router = express.Router();
 
@@ -184,6 +208,54 @@ router.post('/:targetUid/edit-profile', denySelfModeration, async (req, res) => 
     return res.json(result);
   } catch (err) {
     return handleServiceError(err, res, 'editProfile');
+  }
+});
+
+// Plan 05-0a — GET /:targetUid/history.
+// Full path after mount: GET /api/admin/moderation/:targetUid/history
+// Auth (verifyIdToken + requireAdmin) is applied at mount in server.js:850,
+// so per-route auth is redundant and intentionally omitted (matches the other
+// routes in this file). Read endpoint — moderationRateLimiter still applies
+// via router.use() above but reads are low-volume.
+router.get('/:targetUid/history', async (req, res) => {
+  try {
+    const { targetUid } = req.params;
+    const rawLimit = parseInt(req.query.limit, 10);
+    const limit = Number.isFinite(rawLimit)
+      ? Math.min(Math.max(rawLimit, 1), 100)
+      : 25;
+    const cursorRaw = req.query.cursor;
+    const cursor = cursorRaw ? decodeCursor(cursorRaw) : null;
+    if (cursorRaw && cursor === undefined) {
+      return res.status(400).json({ error: 'invalid_cursor' });
+    }
+
+    const query = { targetUid };
+    if (cursor) {
+      // Strictly after the cursor in (createdAt DESC, _id DESC) order.
+      query.$or = [
+        { createdAt: { $lt: cursor.createdAt } },
+        { createdAt: cursor.createdAt, _id: { $lt: cursor._id } },
+      ];
+    }
+
+    // Fetch limit+1 so we can detect whether a next page exists without a
+    // second count() round-trip.
+    const rows = await ModerationAction
+      .find(query)
+      .sort({ createdAt: -1, _id: -1 })
+      .limit(limit + 1)
+      .lean();
+
+    const hasMore = rows.length > limit;
+    const items = hasMore ? rows.slice(0, limit) : rows;
+    const nextCursor = hasMore ? encodeCursor(items[items.length - 1]) : null;
+
+    return res.status(200).json({ items, nextCursor });
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error('[GET /admin/moderation/:targetUid/history] error', err);
+    return res.status(500).json({ error: 'internal_error' });
   }
 });
 
