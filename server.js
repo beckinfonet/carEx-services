@@ -251,7 +251,8 @@ app.get('/.well-known/assetlinks.json', (req, res) => {
       relation: ['delegate_permission/common.handle_all_urls'],
       target: {
         namespace: 'android_app',
-        package_name: 'com.carex.marketplace',
+        // Must match android/app/build.gradle applicationId (com.carex.market)
+        package_name: 'com.carex.market',
         sha256_cert_fingerprints: fingerprints,
       },
     },
