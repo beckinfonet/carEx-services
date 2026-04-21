@@ -9,6 +9,18 @@ const { ensureInitialized } = require('./firebaseAdmin');
  */
 async function verifyIdToken(req, res, next) {
   const header = req.header('authorization') || req.header('Authorization') || '';
+  // DIAG 2026-04-20: temporary — remove after prod auth debug concludes. #prod-debug
+  // Logs header length + 14-char prefix only (never full token); JWT header prefix
+  // like "Bearer eyJhbGc" is non-secret. Scope: only verifyIdToken-gated routes fire.
+  console.log(
+    '[verifyIdToken]',
+    req.method,
+    req.originalUrl,
+    'auth-header:',
+    header
+      ? `present(len=${header.length}, prefix="${header.slice(0, 14)}")`
+      : 'ABSENT',
+  );
   const match = header.match(/^Bearer (.+)$/);
   if (!match) {
     return res.status(401).json({ error: 'unauthenticated', message: 'Missing or invalid idToken' });
