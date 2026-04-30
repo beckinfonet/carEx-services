@@ -663,7 +663,7 @@ app.post('/api/otp/verify', async (req, res) => {
 });
 
 // Upload and create car (validate makeId/modelId)
-app.post('/api/cars', attachAuthIfPresent, requireNotSuspended('create_listing'), upload.array('images', 25), async (req, res) => {
+app.post('/api/cars', upload.array('images', 25), attachAuthIfPresent, requireNotSuspended('create_listing'), async (req, res) => {
   try {
     const {
       makeId, modelId, trimLevel, wheelbase, year, price, mileage, fuel, currency, description, bodyType,
