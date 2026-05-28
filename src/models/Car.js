@@ -1,3 +1,7 @@
+// CAUTION (Phase 7 v1.1): This model has TWO independent status fields that both default to 'active'.
+//   - listingStatus: 'active' | 'booked' | 'sold'                         — seller-side lifecycle (booking flow)
+//   - status:        'active' | 'suspended' | 'archived' | 'deleted'      — admin-side moderation (LDATA-01)
+// Do NOT conflate. Phase 7 D-08, 07-CONTEXT.md.
 const mongoose = require('mongoose');
 
 // Car Schema (listings reference makeId/modelId)
@@ -39,7 +43,16 @@ const carSchema = new mongoose.Schema({
   listingStatus: { type: String, enum: ['active', 'booked', 'sold'], default: 'active' },
   bookedByUid: { type: String, default: null },
   stripePaymentIntentId: { type: String, default: null },
+  status: { type: String, enum: ['active', 'suspended', 'archived', 'deleted'], default: 'active', required: true, index: true },
+  moderationReason: { type: String, enum: ['spam', 'policy_violation', 'fraud', 'inactive_seller', 'other'], default: null },
+  moderationNote: { type: String, default: null, maxlength: 2000 },
+  moderatedBy: { type: String, default: null },           // Firebase uid of admin
+  moderatedAt: { type: Date, default: null },
+  lastEditedBy: { type: String, default: null },          // Firebase uid of admin (LADM-01)
+  lastEditedAt: { type: Date, default: null },
 });
+
+carSchema.index({ sellerId: 1, status: 1 });
 
 // ENF-02: hide Cars whose seller is non-active OR no longer APPROVED.
 // Admin paths + the confirm-booking re-check opt out via the bypass flag on
