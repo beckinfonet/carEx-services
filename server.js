@@ -20,6 +20,8 @@ const { attachAuthIfPresent } = require('./src/security/attachAuthIfPresent');
 const { requireNotSuspended } = require('./src/security/requireNotSuspended');
 const { ensureBaseline } = require('./src/security/ensureBaseline');
 const moderationRouter = require('./src/moderation/router');
+const listingModerationRouter = require('./src/moderation/listingRouter');
+const { listingModerationRateLimiter } = require('./src/moderation/listingRateLimit');
 const { confirmBooking: confirmBookingService, ProviderSuspendedError } = require('./src/payments/confirmBooking');
 
 const app = express();
@@ -849,6 +851,7 @@ app.put('/api/cars/:id', upload.array('images', 25), async (req, res) => {
 // legacy routes below keep their existing callerUid-in-body pattern until a
 // follow-up milestone migrates them (D-06).
 app.use('/api/admin/moderation', verifyIdToken, requireAdmin, moderationRouter);
+app.use('/api/admin/moderation/listings', verifyIdToken, requireAdmin, listingModerationRateLimiter, listingModerationRouter);
 
 // Check if current user is an admin
 app.get('/api/admin/status/:uid', async (req, res) => {
