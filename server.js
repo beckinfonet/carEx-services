@@ -22,6 +22,7 @@ const { ensureBaseline } = require('./src/security/ensureBaseline');
 const moderationRouter = require('./src/moderation/router');
 const listingModerationRouter = require('./src/moderation/listingRouter');
 const { listingModerationRateLimiter } = require('./src/moderation/listingRateLimit');
+const { upload, s3 } = require('./src/uploads/carImages');
 const { confirmBooking: confirmBookingService, ProviderSuspendedError } = require('./src/payments/confirmBooking');
 
 const app = express();
@@ -40,29 +41,10 @@ mongoose.connect(process.env.MONGODB_URI, { dbName: 'CarEx' })
   })
   .catch((err) => console.error('MongoDB connection error:', err));
 
-// AWS S3 Configuration
-const s3 = new S3Client({
-  region: process.env.AWS_REGION,
-  credentials: {
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-  },
-});
-
-const upload = multer({
-  storage: multerS3({
-    s3: s3,
-    bucket: process.env.AWS_BUCKET_NAME,
-    metadata: function (req, file, cb) {
-      cb(null, { fieldName: file.fieldname });
-    },
-    key: function (req, file, cb) {
-      const folder = req.body.bodyType ? req.body.bodyType.toLowerCase() : 'misc';
-      cb(null, `${folder}/${Date.now().toString()}-${file.originalname}`);
-    },
-  }),
-});
-
+// AWS S3 Configuration — `s3` + `upload` (multer-S3 instance for car-image
+// multipart uploads) now live in src/uploads/carImages.js so both the seller
+// PUT (/api/cars/:id) and the admin Edit (PATCH /api/admin/moderation/listings/:carId)
+// share a single source of truth (D-D-2 / Phase 8 Pitfall 1).
 const uploadAvatar = multer({
   storage: multerS3({
     s3: s3,
