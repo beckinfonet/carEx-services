@@ -128,6 +128,12 @@ async function editListing({ adminUid, adminEmail, carId, fields, uploadedFiles 
   // send makeName/modelName directly — they're derived from the validated docs.
   let resolvedMakeName, resolvedModelName;
   if (fields.makeId) {
+    // CR-03: pre-validate ObjectId shape so a malformed makeId surfaces as
+    // 400 invalid_make instead of a Mongoose CastError 500 (the modelId
+    // branch below already does this — mirror the same guard here).
+    if (!mongoose.isValidObjectId(fields.makeId)) {
+      throw new ListingServiceError('invalid_make');
+    }
     const { VehicleMake } = getVehicleModels();
     const makeDoc = await VehicleMake.findOne({ _id: fields.makeId, isActive: true }).lean();
     if (!makeDoc) {
