@@ -94,4 +94,29 @@ carSchema.pre(/^find/, async function () {
   this.setQuery(nextQuery);
 });
 
+// Phase 9 LENF-01: hide non-active listings from public reads by default.
+// Bypass via setOptions with the per-call admin opt-out flag (see the short-
+// circuit check below) for admin/Phase 10 paths. Sibling to the seller-cascade
+// hook above (D-04: orthogonal — each bypass flag short-circuits its own
+// filter independently). CR-01-equivalent $and-combine preserves caller's
+// status filter (Pitfall 2 — admin querying status='deleted' must work with
+// the bypass flag set).
+carSchema.pre(/^find/, function () {
+  if (this.getOptions().includeAllListingStatuses) return;
+  const currentQuery = this.getQuery();
+  const existingClause = currentQuery.status;
+  const nextQuery = { ...currentQuery };
+  if (existingClause === undefined) {
+    nextQuery.status = 'active';
+  } else {
+    delete nextQuery.status;
+    nextQuery.$and = [
+      ...(currentQuery.$and || []),
+      { status: existingClause },
+      { status: 'active' },
+    ];
+  }
+  this.setQuery(nextQuery);
+});
+
 module.exports = mongoose.model('Car', carSchema);
