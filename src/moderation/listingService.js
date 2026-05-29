@@ -223,24 +223,30 @@ async function editListing({ adminUid, adminEmail, carId, fields, uploadedFiles 
     changeSet.modelName = resolvedModelName;
   }
 
-  // Image-merge (D-D, mirror server.js:778-785 seller-PUT pattern).
-  // existingImageUrls is a JSON-stringified array of URLs the admin wants to
-  // KEEP. uploadedFiles are new multer-S3 URLs (req.files.map(f => f.location)
-  // in the router). Final imageUrls = kept ++ new.
-  //
-  // existingImageUrls undefined → admin did not submit any image manipulation;
-  // start from current.imageUrls (no-op default — same as seller PUT).
-  // existingImageUrls JSON.parse fail → swallow (mirrors seller-PUT try/catch
-  // at server.js:780-782); treat as no-change keep.
+  // Image-merge (D-D, mirror server.js:778-785 seller-PUT pattern, with the
+  // CR-01/WR-06 hardening: validate parse result is an Array of strings BEFORE
+  // entering the transaction. Diverges from the seller-PUT swallow-on-error
+  // because:
+  //   1. Seller-PUT's swallow silently keeps current images even when the
+  //      seller intended to remove some — right-to-erasure / GDPR removal
+  //      flows depend on this being explicit, not silent.
+  //   2. Non-array JSON (e.g., '"foo"' or 'null' or '{}') corrupts
+  //      Car.imageUrls — `[...string]` spreads characters into the array,
+  //      `[...null]` throws TypeError INSIDE the transaction, etc.
+  // Both vectors fixed by throwing invalid_payload before opening a session.
   const newUrls = (uploadedFiles || []).map((f) => f.location);
   let keptUrls = current.imageUrls || [];
   if (fields.existingImageUrls !== undefined) {
+    let parsed;
     try {
-      keptUrls = JSON.parse(fields.existingImageUrls);
+      parsed = JSON.parse(fields.existingImageUrls);
     } catch (_e) {
-      // Swallow — server.js:780-782 mirror. Treat as "kept = current" no-change.
-      keptUrls = current.imageUrls || [];
+      throw new ListingServiceError('invalid_payload');
     }
+    if (!Array.isArray(parsed) || !parsed.every((u) => typeof u === 'string')) {
+      throw new ListingServiceError('invalid_payload');
+    }
+    keptUrls = parsed;
   }
   const mergedImageUrls = [...keptUrls, ...newUrls];
   const currentImageUrls = current.imageUrls || [];
