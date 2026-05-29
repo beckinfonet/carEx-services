@@ -692,7 +692,14 @@ app.post('/api/cars', upload.array('images', 25), attachAuthIfPresent, requireNo
       // reports "unique", producing a duplicate that becomes visible after
       // unsuspend. Deep links (listing/:carId) surface listingIds, so a
       // collision would silently route to the wrong car post-unsuspend.
-      const existing = await Car.findOne({ listingId }).setOptions({ includeAllUsers: true });
+      //
+      // Phase 8 WR-08: also chain includeAllListingStatuses so the loop sees
+      // soft-deleted (status='deleted') and archived/suspended listings. The
+      // hide hook for those statuses arrives in Phase 9; chaining now keeps
+      // this loop forward-compatible (mirrors the same flag chained on every
+      // admin-side Car read in src/moderation/listingService.js).
+      const existing = await Car.findOne({ listingId })
+        .setOptions({ includeAllUsers: true, includeAllListingStatuses: true });
       if (!existing) isUnique = true;
     }
 
