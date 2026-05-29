@@ -27,6 +27,38 @@ const Car = require('../models/Car');
 const ListingModerationAction = require('../models/ListingModerationAction');
 const { ListingServiceError } = require('./listingErrors');
 
+// Pitfall 7 lazy-model resolution helper. VehicleMake and VehicleModel are
+// inlined in server.js (lines 99-100), NOT extracted to src/models/. Using
+// mongoose.model('Name') at call time defers resolution until first invocation
+// — by which point server.js has registered them at boot, OR a test has
+// registered loose-schema variants under the canonical names (Pitfall 7).
+// Same pattern as v1.0 src/moderation/service.js's getProfileModel (lines
+// 307-320) which lazy-resolves Broker / LogisticsPartner.
+function getVehicleModels() {
+  return {
+    VehicleMake: mongoose.model('VehicleMake'),
+    VehicleModel: mongoose.model('VehicleModel'),
+  };
+}
+
+// Module-scope whitelist of editable keys to drive the fieldDiff loop. This is
+// the Edit-side mirror of editListingSchema in listingSchemas.js — the schema
+// is the router-layer wall (Zod .strict() rejects unknown top-level keys); this
+// list scopes the service-layer iteration so a future plan that broadens the
+// schema does NOT silently start diffing system fields like sellerId/_id.
+// existingImageUrls is handled separately (it's an INPUT for the image-merge,
+// not a Car field). imageUrls is handled separately too (computed via merge).
+const EDIT_DIFF_KEYS = [
+  'makeId', 'modelId', 'trimLevel', 'wheelbase',
+  'year', 'price', 'mileage',
+  'fuel', 'currency', 'description', 'bodyType',
+  'engine', 'transmission', 'drivetrain', 'mpg', 'condition',
+  'knownIssues',
+  'exteriorColor', 'interiorColor', 'interiorMaterial',
+  'seats', 'doors',
+  'phoneNumber', 'telegramUsername',
+];
+
 // Wave 1 placeholder bodies — Wave 2/3 plans fill these. The transaction
 // pattern Wave 2/3 must follow lives in v1.0 src/moderation/service.js
 // (`suspend` ~line 42-134 for transitions; `editProfile` ~line 438-530 for
@@ -38,13 +70,261 @@ const { ListingServiceError } = require('./listingErrors');
 //      b. Update Car (status + audit-stamp fields) with { session }.
 //   3. session.endSession() in finally.
 
+// --- editListing (LADM-01) ---------------------------------------------
+//
+// Edit is the only Phase 8 handler that diverges structurally from the
+// transition handlers above: NO status change (D-A-4 — works on any status),
+// computes per-field { before, after } fieldDiff (D-A-2), validates makeId/
+// modelId via lazy mongoose.model('VehicleMake' / 'VehicleModel') (Pitfall 7),
+// and stamps lastEditedBy / lastEditedAt but NEVER moderatedBy / moderatedAt
+// (D-A-3 distinction — Edit is content-correction, NOT a state change).
+//
+// Four-section body:
+//   A. Pre-transaction read (D-A-4 — applies to ANY status, no same-state
+//      guard, no not_moderated guard).
+//   B. makeId / modelId lazy validation (mirror server.js:787-796).
+//   C. fieldDiff + changeSet computation (mirror v1.0 service.js:438-530
+//      editProfile pattern + image-merge per server.js:778-785).
+//   D. Empty-diff guard (D-06 — no_changes) + atomic transaction.
+//
+// Atomicity contract (D-06, D-08) preserved: audit-row insert THEN Car
+// updateOne, both with { session }. fieldDiff + audit row + Car field-set
+// update all commit-or-rollback together.
 async function editListing({ adminUid, adminEmail, carId, fields, uploadedFiles }) {
-  // Wave 3 (LADM-01) will implement. Reads current Car, computes per-field
-  // { before, after } changed-only fieldDiff (D-A-2), validates makeId/modelId
-  // if changed (server.js:787-796 pattern), stamps lastEditedBy/lastEditedAt
-  // (D-A-3), writes audit row with action='edit' + fieldDiff.
-  void adminUid; void adminEmail; void carId; void fields; void uploadedFiles;
-  throw new ListingServiceError('not_implemented');
+  // Defensive arg-check at function top — direct service callers cannot bypass.
+  if (!adminUid || !adminEmail || !carId || !fields) {
+    throw new ListingServiceError('invalid_payload');
+  }
+
+  // ====================================================================
+  // Section A — Pre-transaction read + status irrelevance (D-A-4).
+  // ====================================================================
+  // Edit applies to ANY status — admin may correct content on a moderated
+  // listing without restoring it first. Audit row uses fromStatus === toStatus
+  // = current.status. NO same-state guard, NO not_moderated guard here.
+  // Both setOptions flags chained per Pitfall 5 (defeats Phase 3
+  // seller-cascade hook + Phase 9 listing-status hook bypass — admin can edit
+  // a deleted listing whose seller is suspended).
+  const current = await Car.findById(carId)
+    .setOptions({ includeAllListingStatuses: true, includeAllUsers: true })
+    .lean();
+  if (!current) {
+    throw new ListingServiceError('listing_not_found');
+  }
+
+  // ====================================================================
+  // Section B — makeId / modelId lazy validation (D-A, server.js:787-796).
+  // ====================================================================
+  // Mirror seller-PUT validation EXACTLY. Lazy mongoose.model() per Pitfall 7
+  // — these models are registered inline in server.js at boot, not extracted
+  // to src/models/. Calling getVehicleModels() at this point lets tests
+  // pre-register loose-schema variants under the canonical names before
+  // requiring this module.
+  //
+  // Re-resolved makeName / modelName feed the changeSet so the denormalized
+  // copies on Car stay consistent (mirrors server.js:792-795). Admin cannot
+  // send makeName/modelName directly — they're derived from the validated docs.
+  let resolvedMakeName, resolvedModelName;
+  if (fields.makeId) {
+    const { VehicleMake } = getVehicleModels();
+    const makeDoc = await VehicleMake.findOne({ _id: fields.makeId, isActive: true }).lean();
+    if (!makeDoc) {
+      throw new ListingServiceError('invalid_make');
+    }
+    resolvedMakeName = makeDoc.name;
+  }
+  if (fields.modelId && fields.makeId) {
+    const { VehicleModel } = getVehicleModels();
+    // Explicit ObjectId cast on the makeId filter — the production schema
+    // (server.js:73) declares makeId as `Schema.Types.ObjectId, ref:
+    // 'VehicleMake'` which auto-casts query strings; loose-schema tests do
+    // not. Casting here makes the query work identically in both modes.
+    // mongoose.isValidObjectId guards against a malformed string surfacing
+    // as a Mongoose CastError 500 instead of our intended 400 invalid_model.
+    if (!mongoose.isValidObjectId(fields.makeId) || !mongoose.isValidObjectId(fields.modelId)) {
+      throw new ListingServiceError('invalid_model');
+    }
+    const makeIdAsOid = new mongoose.Types.ObjectId(fields.makeId);
+    const modelDoc = await VehicleModel.findOne({
+      _id: fields.modelId,
+      makeId: makeIdAsOid,
+      isActive: true,
+    }).lean();
+    if (!modelDoc) {
+      throw new ListingServiceError('invalid_model');
+    }
+    resolvedModelName = modelDoc.name;
+  }
+  // NOTE: modelId without makeId — seller PUT only re-resolves when BOTH are
+  // present (server.js:787 `if (makeId && modelId)`). Edit mirrors this: a
+  // modelId-only payload passes through as a raw fieldDiff entry without
+  // re-validation. Stricter validation would be an asymmetry vs. the seller
+  // PUT — and D-A-1 forbids that.
+
+  // ====================================================================
+  // Section C — fieldDiff + changeSet computation (D-A-2, image-merge D-D).
+  // ====================================================================
+  // Per-field { before, after } changed-only diff. EDIT_DIFF_KEYS scopes the
+  // iteration; submitted-but-equal keys filter out so the diff is
+  // changed-only (D-A-2). For arrays (knownIssues, imageUrls), JSON.stringify
+  // equality covers reorder + add + remove uniformly.
+  const fieldDiff = {};
+  const changeSet = {};
+
+  for (const key of EDIT_DIFF_KEYS) {
+    if (fields[key] === undefined) continue;
+    let before = current[key];
+    let after = fields[key];
+
+    // knownIssues: mirror server.js:799-804 JSON-string fallback. Schema
+    // accepts either string (multipart JSON-stringified array) or array. The
+    // seller PUT falls back to [knownIssues] when JSON.parse fails — we
+    // mirror that exact fallback.
+    if (key === 'knownIssues' && typeof after === 'string') {
+      try {
+        after = JSON.parse(after);
+      } catch (_e) {
+        after = [after];
+      }
+    }
+
+    // Compare with JSON.stringify for arrays / objects; direct === for scalars.
+    const beforeNormalized = before ?? null;
+    const beforeJson = Array.isArray(beforeNormalized) || (beforeNormalized && typeof beforeNormalized === 'object')
+      ? JSON.stringify(beforeNormalized)
+      : null;
+    const afterJson = Array.isArray(after) || (after && typeof after === 'object')
+      ? JSON.stringify(after)
+      : null;
+
+    let changed;
+    if (beforeJson !== null || afterJson !== null) {
+      changed = JSON.stringify(beforeNormalized) !== JSON.stringify(after);
+    } else {
+      changed = before !== after;
+    }
+
+    if (changed) {
+      fieldDiff[key] = { before: before ?? null, after };
+      changeSet[key] = after;
+    }
+  }
+
+  // If makeId was re-resolved, ALSO record makeName fieldDiff + changeSet
+  // entry — denormalized name follows the id (server.js:794 pattern).
+  if (resolvedMakeName !== undefined && resolvedMakeName !== current.makeName) {
+    fieldDiff.makeName = { before: current.makeName ?? null, after: resolvedMakeName };
+    changeSet.makeName = resolvedMakeName;
+  }
+  if (resolvedModelName !== undefined && resolvedModelName !== current.modelName) {
+    fieldDiff.modelName = { before: current.modelName ?? null, after: resolvedModelName };
+    changeSet.modelName = resolvedModelName;
+  }
+
+  // Image-merge (D-D, mirror server.js:778-785 seller-PUT pattern).
+  // existingImageUrls is a JSON-stringified array of URLs the admin wants to
+  // KEEP. uploadedFiles are new multer-S3 URLs (req.files.map(f => f.location)
+  // in the router). Final imageUrls = kept ++ new.
+  //
+  // existingImageUrls undefined → admin did not submit any image manipulation;
+  // start from current.imageUrls (no-op default — same as seller PUT).
+  // existingImageUrls JSON.parse fail → swallow (mirrors seller-PUT try/catch
+  // at server.js:780-782); treat as no-change keep.
+  const newUrls = (uploadedFiles || []).map((f) => f.location);
+  let keptUrls = current.imageUrls || [];
+  if (fields.existingImageUrls !== undefined) {
+    try {
+      keptUrls = JSON.parse(fields.existingImageUrls);
+    } catch (_e) {
+      // Swallow — server.js:780-782 mirror. Treat as "kept = current" no-change.
+      keptUrls = current.imageUrls || [];
+    }
+  }
+  const mergedImageUrls = [...keptUrls, ...newUrls];
+  const currentImageUrls = current.imageUrls || [];
+  if (JSON.stringify(currentImageUrls) !== JSON.stringify(mergedImageUrls)) {
+    fieldDiff.imageUrls = { before: currentImageUrls, after: mergedImageUrls };
+    changeSet.imageUrls = mergedImageUrls;
+  }
+
+  // ====================================================================
+  // Section D — Empty-diff guard (D-06) + atomic transaction.
+  // ====================================================================
+  if (Object.keys(fieldDiff).length === 0) {
+    throw new ListingServiceError('no_changes');
+  }
+
+  const lastEditedAt = new Date();
+  const session = await mongoose.startSession();
+  let insertedAction;
+  try {
+    await session.withTransaction(async () => {
+      // 1. Audit row FIRST (D-08 ordering). Array form mandatory (Pitfall 2).
+      //    action='edit' + fieldDiff populated + reasonCategory:null.
+      //    fromStatus === toStatus === current.status (D-A-4 — Edit does NOT
+      //    transition state; the audit row's discriminator is the populated
+      //    fieldDiff + action:'edit').
+      const [action] = await ListingModerationAction.create([{
+        listingId: carId,
+        sellerUid: current.sellerId,
+        adminUid,
+        adminEmail,
+        action: 'edit',
+        fromStatus: current.status,
+        toStatus: current.status,
+        reasonCategory: null,
+        reasonNote: null,
+        fieldDiff,
+      }], { session });
+      insertedAction = action;
+
+      // 2. Update Car SECOND with the changeSet + D-A-3 stamps.
+      //
+      //    D-A-3: Edit stamps lastEditedBy/lastEditedAt but NEVER touches
+      //    moderatedBy/moderatedAt. moderatedBy reflects last status change
+      //    (suspend/archive/delete/restore); lastEditedBy reflects last admin
+      //    content edit. Distinct semantics — the test layer locks this
+      //    (editListing.test.js test 13).
+      const updated = await Car.updateOne(
+        { _id: carId },
+        {
+          $set: {
+            ...changeSet,
+            lastEditedBy: adminUid,
+            lastEditedAt,
+          },
+        },
+        { session }
+      );
+      if (updated.matchedCount !== 1) {
+        throw new ListingServiceError('listing_not_found');
+      }
+    });
+  } finally {
+    await session.endSession();
+  }
+
+  // D-02 thin projection — Edit-specific fields (lastEditedBy + lastEditedAt)
+  // populated; moderatedBy + moderatedAt taken from `current` (Edit does NOT
+  // touch them per D-A-3). Other handlers omit lastEditedBy/lastEditedAt
+  // because only Edit stamps them.
+  return {
+    listing: {
+      _id: carId,
+      status: current.status,
+      moderatedBy: current.moderatedBy ?? null,
+      moderatedAt: current.moderatedAt ?? null,
+      lastEditedBy: adminUid,
+      lastEditedAt,
+    },
+    action: {
+      _id: insertedAction._id.toString(),
+      action: 'edit',
+      fromStatus: current.status,
+      toStatus: current.status,
+      createdAt: insertedAction.createdAt,
+    },
+  };
 }
 
 // --- suspendListing (LADM-02) ------------------------------------------

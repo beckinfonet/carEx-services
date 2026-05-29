@@ -326,6 +326,10 @@ describe('service.editListing (LADM-01)', () => {
   });
 
   test('makeId/modelId validation OK (Pitfall 7 lazy resolution): fieldDiff captures id + name fields, makeName/modelName resolved', async () => {
+    // Seed with ObjectId-typed _id + makeId — mongoose auto-casts query
+    // strings → ObjectIds on the way in (matches production server.js
+    // behavior at line 73 where makeId is `Schema.Types.ObjectId, ref:
+    // 'VehicleMake'`). Test passes the string form to mirror multipart input.
     const makeId = new mongoose.Types.ObjectId();
     const modelId = new mongoose.Types.ObjectId();
     await VehicleMake.collection.insertOne({
