@@ -29,6 +29,47 @@ const Car = require('../models/Car');
 const ListingModerationAction = require('../models/ListingModerationAction');
 const { ListingServiceError } = require('./listingErrors');
 
+// ─────────────────────────────────────────────────────────────────────────
+// Plan 10-03 (LUI-04) — search helpers for searchListings() below.
+// Ported verbatim from src/admin/router.js:30-57 (Plan 05-0b user-search) so
+// the listing-search surface uses the SAME cursor shape (base64(JSON({createdAt,
+// _id}))) as user-search — mobile code has exactly one cursor reasoning model.
+// ─────────────────────────────────────────────────────────────────────────
+
+// ReDoS defence: strip every regex metacharacter before piping a user-supplied
+// substring to mongo $regex. Identical to admin/router.js:33.
+function escapeRegex(str) {
+  return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Null-safe — returns null when item is falsy (admin/router.js:39-45 mirror).
+function encodeCursor(item) {
+  if (!item) return null;
+  return Buffer.from(
+    JSON.stringify({ createdAt: item.createdAt.toISOString(), _id: item._id.toString() }),
+    'utf8',
+  ).toString('base64');
+}
+
+// Returns:
+//   - null when input is empty / absent (caller treats as "no cursor")
+//   - undefined on parse failure (caller treats as defensive empty page per
+//     Plan 10-03 Block 8; admin/router.js:57 sentinel surfaces as 400 instead
+//     because user-search opted to fail loud — listing-search opts for empty
+//     per RESEARCH §"invalid_cursor defensive" lines 1166-1168).
+//   - { createdAt: Date, _id: string } on success
+function decodeCursor(cursor) {
+  if (!cursor) return null;
+  try {
+    const json = Buffer.from(cursor, 'base64').toString('utf8');
+    const parsed = JSON.parse(json);
+    if (!parsed.createdAt || !parsed._id) throw new Error('missing fields');
+    return { createdAt: new Date(parsed.createdAt), _id: parsed._id };
+  } catch (_err) {
+    return undefined;
+  }
+}
+
 // Pitfall 7 lazy-model resolution helper. VehicleMake and VehicleModel are
 // inlined in server.js (lines 99-100), NOT extracted to src/models/. Using
 // mongoose.model('Name') at call time defers resolution until first invocation
@@ -891,10 +932,123 @@ async function restoreListing({ adminUid, adminEmail, carId, note }) {
   };
 }
 
+// --- searchListings (Plan 10-03, LUI-04) -------------------------------
+//
+// GET /api/admin/moderation/listings backing function. Ports the shape of
+// src/admin/router.js searchUsers (Plan 05-0b) to the listing domain, with two
+// load-bearing differences:
+//
+//   1. PII GUARD (Pitfall 10, T-10-03). The $or substring search whitelists
+//      ONLY makeName / modelName (case-insensitive substring) + listingId
+//      (prefix). description / phoneNumber / telegramUsername / email MUST
+//      NEVER be added — admins can probe seller PII via the search box if
+//      they do, defeating the principle-of-least-information posture.
+//      The 10-03 frontmatter `forbidden` list and Block 6 tests in
+//      __tests__/listingRouter.search.test.js lock this set.
+//
+//   2. HIDE-HOOK BYPASS (Pitfall 4, T-10-04). Car.find() runs under TWO
+//      pre(/^find/) hooks: the Phase 3 seller-cascade hook (Car.js:63-95) AND
+//      the Phase 9 listing-status hook (Car.js:104-120). Without
+//      .setOptions({ includeAllListingStatuses: true }) the listing-status
+//      hook silently filters to status='active' only — admin would see ZERO
+//      non-active rows, defeating LUI-04. We deliberately do NOT chain
+//      includeAllUsers here: admin should NOT see listings owned by suspended
+//      sellers in this surface (those listings are reachable via the user-
+//      moderation flow). Block 3 tests assert all 4 statuses are visible;
+//      a separate v1.2 plan can revisit the seller-cascade decision if UAT
+//      asks for it.
+//
+// Cursor shape mirrors searchUsers: base64(JSON({createdAt, _id})). Uniform
+// sort { createdAt: -1, _id: -1 } across all status filters per Pitfall 8 /
+// RESEARCH A3 — no per-status moderatedAt sort in v1; defer to v1.2 if UAT
+// demands.
+async function searchListings({ status, q, cursor, limit = 25 }) {
+  const filter = {};
+  const andClauses = [];
+
+  // Status filter — schema-validated upstream by searchListingsQuerySchema.
+  if (status) {
+    filter.status = status;
+  }
+
+  // q whitelist — Pitfall 10 PII guard. ONLY 3 fields are searched:
+  //   - makeName: case-insensitive substring (e.g., q=Toyota matches "Toyota")
+  //   - modelName: case-insensitive substring (e.g., q=Camry matches "Camry")
+  //   - listingId: PREFIX match (e.g., q=AB12 matches "AB12CD34")
+  // Adding description / phoneNumber / telegramUsername / email here breaks
+  // T-10-03 mitigation. Locked by Block 6 tests + plan frontmatter.
+  if (q && q.trim().length > 0) {
+    const escaped = escapeRegex(q.trim());
+    filter.$or = [
+      { makeName: { $regex: escaped, $options: 'i' } },
+      { modelName: { $regex: escaped, $options: 'i' } },
+      { listingId: { $regex: '^' + escaped } },
+    ];
+  }
+
+  // Cursor decode. Plan 10-03 Block 8: invalid cursor → defensive empty page
+  // ({ rows: [], nextCursor: null }) rather than 400. This diverges from
+  // admin/router.js:113-115 which fails loud with 400 invalid_cursor — the
+  // listing surface opts for empty so a stale mobile cursor (from a deleted
+  // row whose ObjectId no longer exists) does not break the admin list.
+  const decoded = cursor ? decodeCursor(cursor) : null;
+  if (cursor && decoded === undefined) {
+    return { rows: [], nextCursor: null };
+  }
+  if (decoded) {
+    andClauses.push({
+      $or: [
+        { createdAt: { $lt: decoded.createdAt } },
+        { createdAt: decoded.createdAt, _id: { $lt: decoded._id } },
+      ],
+    });
+  }
+
+  if (andClauses.length > 0) {
+    filter.$and = andClauses;
+  }
+
+  // LOAD-BEARING: includeAllListingStatuses bypass per Phase 9 D-01. Without
+  // it the listing-status hide hook (Car.js:104-120) folds in status='active'
+  // and the response loses all non-active rows. Block 3 of the test file
+  // proves this assertion is wired.
+  const rows = await Car.find(filter)
+    .setOptions({ includeAllListingStatuses: true })
+    .sort({ createdAt: -1, _id: -1 })
+    .limit(limit + 1)
+    .lean();
+
+  const hasMore = rows.length > limit;
+  const items = hasMore ? rows.slice(0, limit) : rows;
+
+  // ListingSearchItem shape — explicit projection so future Car schema
+  // additions don't accidentally leak into the response.
+  const mapped = items.map((c) => ({
+    _id: c._id.toString(),
+    status: c.status,
+    makeName: c.makeName ?? null,
+    modelName: c.modelName ?? null,
+    year: c.year ?? null,
+    price: c.price ?? null,
+    firstPhotoUrl: Array.isArray(c.imageUrls) && c.imageUrls.length > 0 ? c.imageUrls[0] : null,
+    sellerId: c.sellerId ?? null,
+    createdAt: c.createdAt,
+    moderatedAt: c.moderatedAt ?? null,
+    moderationReason: c.moderationReason ?? null,
+    listingId: c.listingId ?? null,
+  }));
+
+  return {
+    rows: mapped,
+    nextCursor: hasMore ? encodeCursor(items[items.length - 1]) : null,
+  };
+}
+
 module.exports = {
   editListing,
   suspendListing,
   archiveListing,
   deleteListing,
   restoreListing,
+  searchListings,
 };

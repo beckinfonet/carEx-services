@@ -69,6 +69,28 @@ const restoreListingSchema = z.object({
 // multipart strings → numbers (mirrors seller-PUT parseInt(year) etc. at
 // server.js:810). z.union for knownIssues handles both JSON-string and
 // array inputs (mirrors server.js:799-804 JSON.parse fallback).
+// --- Search (Plan 10-03, LUI-04) ---
+// Query schema for GET /api/admin/moderation/listings. .strict() (D-09) so
+// unknown query params reject as 400 invalid_payload at parse time — Pitfall
+// 10 PII guard depends on this (description / phoneNumber / telegramUsername
+// cannot sneak in as `?description=<probe>` against a future widened schema).
+//
+// `limit` uses z.coerce.number() because query-string values arrive as strings
+// (mirrors editListingSchema.year / price / mileage z.coerce.number() pattern
+// above for the same reason). Non-numeric input ("foo") rejects per Block 7.
+//
+// `status` enum mirrors the four-value Car.status taxonomy verbatim — Plan
+// 10-03 does NOT re-derive it from Car.schema.path('status').enumValues (the
+// REASON_CATEGORIES pattern above) because Car.status is a model-only enum
+// that doesn't need cross-handler dynamism. Future status additions widen the
+// model AND this schema as part of the same plan.
+const searchListingsQuerySchema = z.object({
+  status: z.enum(['active', 'suspended', 'archived', 'deleted']).optional(),
+  q: z.string().max(128).optional(),
+  cursor: z.string().optional(),
+  limit: z.coerce.number().int().positive().max(100).optional(),
+}).strict();
+
 const editListingSchema = z.object({
   // String fields — permissive (matches seller PUT loose schema)
   makeId: z.string().optional(),
@@ -116,4 +138,5 @@ module.exports = {
   deleteListingSchema,
   restoreListingSchema,
   editListingSchema,
+  searchListingsQuerySchema,
 };
