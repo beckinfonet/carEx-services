@@ -24,36 +24,14 @@ const User = require('../models/User');
 const Car = require('../models/Car');
 const Broker = require('../models/Broker');
 const LogisticsPartner = require('../models/LogisticsPartner');
+// Phase 9 Plan 09-01 — shared refund-first-throw-second helper. ProviderSuspendedError
+// class moved into refundAndThrow.js to avoid circular require; re-exported below
+// for back-compat (server.js:1061 instanceof + existing test
+// __tests__/enforcement/confirmBooking.transaction.test.js require unchanged).
+const { refundAndThrow, ProviderSuspendedError } = require('./refundAndThrow');
 // ServiceOrder stays inline in server.js per Phase 1 D-02; resolve lazily inside
 // the function body via mongoose.model('ServiceOrder') so this module works
 // whether server.js has loaded yet (test isolation).
-
-class ProviderSuspendedError extends Error {
-  constructor(message) {
-    super(message);
-    this.name = 'ProviderSuspendedError';
-  }
-}
-
-// Stripe refunds are NOT in the Mongo transaction. Refund first, throw second.
-// Reversed order risks "buyer charged, no order, no refund" on Stripe API failure.
-async function refundThenThrow(stripe, paymentIntentId, errorCode, providerUid) {
-  let refundId = null;
-  let refundFailed = false;
-  try {
-    const refund = await stripe.refunds.create({ payment_intent: paymentIntentId });
-    refundId = refund.id;
-  } catch (err) {
-    refundFailed = true;
-    // eslint-disable-next-line no-console
-    console.error('[confirmBooking] Stripe refund failed:', err);
-  }
-  const err = new ProviderSuspendedError(errorCode);
-  err.providerUid = providerUid;
-  err.refundId = refundId;
-  err.refundFailed = refundFailed;
-  throw err;
-}
 
 // De-dupe items by { providerUid, providerType }. Pure — no DB calls.
 // Mirrors the grouping in server.js:1079-1116 (POST /api/orders handler).
@@ -149,7 +127,10 @@ async function confirmBooking({ stripe, paymentIntentId, carId, buyerUid, items 
         .session(session)
         .lean();
       if (!buyer || buyer.moderationStatus?.state !== 'active') {
-        await refundThenThrow(stripe, paymentIntentId, 'provider_suspended', buyerUid);
+        await refundAndThrow(stripe, paymentIntentId, {
+          error: 'provider_suspended',
+          providerUid: buyerUid,
+        });
       }
 
       // ---- b. Provider re-check + providerSnapshot build -----------------
@@ -164,7 +145,10 @@ async function confirmBooking({ stripe, paymentIntentId, carId, buyerUid, items 
           providerUser.moderationStatus?.state !== 'active' ||
           providerUser[roleField] !== 'APPROVED'
         ) {
-          await refundThenThrow(stripe, paymentIntentId, 'provider_suspended', group.providerUid);
+          await refundAndThrow(stripe, paymentIntentId, {
+            error: 'provider_suspended',
+            providerUid: group.providerUid,
+          });
         }
 
         const ProfileModel = group.providerType === 'broker' ? Broker : LogisticsPartner;
@@ -203,7 +187,10 @@ async function confirmBooking({ stripe, paymentIntentId, carId, buyerUid, items 
         sellerUser.moderationStatus?.state !== 'active' ||
         sellerUser.sellerStatus !== 'APPROVED'
       ) {
-        await refundThenThrow(stripe, paymentIntentId, 'provider_suspended', car.sellerId);
+        await refundAndThrow(stripe, paymentIntentId, {
+          error: 'provider_suspended',
+          providerUid: car.sellerId,
+        });
       }
 
       car.listingStatus = 'booked';
