@@ -150,11 +150,93 @@ async function suspendListing({ adminUid, adminEmail, carId, reasonCategory, not
   };
 }
 
+// --- archiveListing (LADM-03) ------------------------------------------
+//
+// Archive is non-punitive (LADM-03 — inactive_seller reason most common).
+// Per D-B open matrix, allows transitions from active/suspended/deleted →
+// archived. Same-state guard rejects archived → archive.
+//
+// Body shape is a byte-equivalent mirror of suspendListing above — only the
+// target-status literal ('archived') and the audit action verb ('archive')
+// differ. Same atomicity contract (D-06, D-08, D-B-1, D-15) applies; see the
+// suspendListing comment block for the full step-by-step rationale.
 async function archiveListing({ adminUid, adminEmail, carId, reasonCategory, note }) {
-  // Wave 2 (LADM-03) will implement. Same shape as suspendListing with
-  // toStatus='archived', action='archive'.
-  void adminUid; void adminEmail; void carId; void reasonCategory; void note;
-  throw new ListingServiceError('not_implemented');
+  if (!adminUid || !adminEmail || !carId || !reasonCategory) {
+    throw new ListingServiceError('invalid_payload');
+  }
+
+  // Pre-transaction read: confirm listing exists + detect same-state idempotency
+  // violation (D-B-1). Both setOptions flags chained per Pitfall 5.
+  const current = await Car.findById(carId)
+    .setOptions({ includeAllListingStatuses: true, includeAllUsers: true })
+    .lean();
+  if (!current) {
+    throw new ListingServiceError('listing_not_found');
+  }
+  if (current.status === 'archived') {
+    throw new ListingServiceError('already_in_state');
+  }
+
+  const moderatedAt = new Date();
+  const session = await mongoose.startSession();
+  let insertedAction;
+  try {
+    await session.withTransaction(async () => {
+      // 1. Insert audit row FIRST (D-08 ordering). Array form mandatory (Pitfall 2).
+      const [action] = await ListingModerationAction.create([{
+        listingId: carId,
+        sellerUid: current.sellerId,
+        adminUid,
+        adminEmail,
+        action: 'archive',
+        fromStatus: current.status,
+        toStatus: 'archived',
+        reasonCategory,
+        reasonNote: note ?? null,
+        fieldDiff: null,
+      }], { session });
+      insertedAction = action;
+
+      // 2. Update Car SECOND (D-15 stamp moderationReason/moderationNote/
+      //    moderatedBy/moderatedAt alongside the status flip).
+      const updated = await Car.updateOne(
+        { _id: carId },
+        {
+          $set: {
+            status: 'archived',
+            moderationReason: reasonCategory,
+            moderationNote: note ?? null,
+            moderatedBy: adminUid,
+            moderatedAt,
+          },
+        },
+        { session }
+      );
+      if (updated.matchedCount !== 1) {
+        throw new ListingServiceError('listing_not_found');
+      }
+    });
+  } finally {
+    await session.endSession();
+  }
+
+  // D-02 thin projection — listing payload carries ONLY the 4 transition-
+  // relevant fields. action payload carries the 5 audit-row identifiers.
+  return {
+    listing: {
+      _id: carId,
+      status: 'archived',
+      moderatedBy: adminUid,
+      moderatedAt,
+    },
+    action: {
+      _id: insertedAction._id.toString(),
+      action: 'archive',
+      fromStatus: current.status,
+      toStatus: 'archived',
+      createdAt: insertedAction.createdAt,
+    },
+  };
 }
 
 async function deleteListing({ adminUid, adminEmail, carId, reasonCategory, note }) {
