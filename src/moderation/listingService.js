@@ -239,12 +239,100 @@ async function archiveListing({ adminUid, adminEmail, carId, reasonCategory, not
   };
 }
 
+// --- deleteListing (LADM-04) -------------------------------------------
+//
+// LADM-04 SOFT-DELETE: document survives. This handler MUST NOT call any of
+// Mongoose's document-removal APIs on the Car model (the *.delete*One,
+// *.delete*Many, *.findOne*AndDelete family). The document remains in
+// MongoDB with status='deleted' so Plan 08-05's restoreListing can flip it
+// back to 'active'. The pre(/^find/) hide hook Phase 9 will land filters
+// non-active listings from public reads; admin reads bypass via
+// .setOptions({ includeAllListingStatuses: true }).
+//
+// Body shape is a byte-equivalent mirror of suspendListing/archiveListing
+// above — only the target-status literal ('deleted') and the audit action
+// verb ('delete') differ. Same atomicity contract (D-06, D-08, D-B-1, D-15)
+// applies; see the suspendListing comment block for the full step-by-step
+// rationale.
 async function deleteListing({ adminUid, adminEmail, carId, reasonCategory, note }) {
-  // Wave 2 (LADM-04) will implement. SOFT-delete only — Car doc stays in DB;
-  // status='deleted', action='delete'. Test invariant: Car.countDocuments({_id})
-  // is still 1 after the operation.
-  void adminUid; void adminEmail; void carId; void reasonCategory; void note;
-  throw new ListingServiceError('not_implemented');
+  if (!adminUid || !adminEmail || !carId || !reasonCategory) {
+    throw new ListingServiceError('invalid_payload');
+  }
+
+  // Pre-transaction read: confirm listing exists + detect same-state idempotency
+  // violation (D-B-1). Both setOptions flags chained per Pitfall 5.
+  const current = await Car.findById(carId)
+    .setOptions({ includeAllListingStatuses: true, includeAllUsers: true })
+    .lean();
+  if (!current) {
+    throw new ListingServiceError('listing_not_found');
+  }
+  if (current.status === 'deleted') {
+    throw new ListingServiceError('already_in_state');
+  }
+
+  const moderatedAt = new Date();
+  const session = await mongoose.startSession();
+  let insertedAction;
+  try {
+    await session.withTransaction(async () => {
+      // 1. Insert audit row FIRST (D-08 ordering). Array form mandatory (Pitfall 2).
+      const [action] = await ListingModerationAction.create([{
+        listingId: carId,
+        sellerUid: current.sellerId,
+        adminUid,
+        adminEmail,
+        action: 'delete',
+        fromStatus: current.status,
+        toStatus: 'deleted',
+        reasonCategory,
+        reasonNote: note ?? null,
+        fieldDiff: null,
+      }], { session });
+      insertedAction = action;
+
+      // 2. Update Car SECOND (D-15 stamp moderationReason/moderationNote/
+      //    moderatedBy/moderatedAt alongside the status flip). SOFT-DELETE:
+      //    Car.updateOne ONLY — NO call to any Mongoose document-removal API
+      //    on Car anywhere in this function (LADM-04 invariant).
+      const updated = await Car.updateOne(
+        { _id: carId },
+        {
+          $set: {
+            status: 'deleted',
+            moderationReason: reasonCategory,
+            moderationNote: note ?? null,
+            moderatedBy: adminUid,
+            moderatedAt,
+          },
+        },
+        { session }
+      );
+      if (updated.matchedCount !== 1) {
+        throw new ListingServiceError('listing_not_found');
+      }
+    });
+  } finally {
+    await session.endSession();
+  }
+
+  // D-02 thin projection — listing payload carries ONLY the 4 transition-
+  // relevant fields. action payload carries the 5 audit-row identifiers.
+  return {
+    listing: {
+      _id: carId,
+      status: 'deleted',
+      moderatedBy: adminUid,
+      moderatedAt,
+    },
+    action: {
+      _id: insertedAction._id.toString(),
+      action: 'delete',
+      fromStatus: current.status,
+      toStatus: 'deleted',
+      createdAt: insertedAction.createdAt,
+    },
+  };
 }
 
 async function restoreListing({ adminUid, adminEmail, carId, note }) {
