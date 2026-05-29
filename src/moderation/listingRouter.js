@@ -36,12 +36,49 @@ const { denySelfModerationListing } = require('./denySelfModerationListing');
 // JSON-only routes + /ping) stays loadable in test environments without
 // AWS credentials.
 let _uploadCache;
+let _s3Cache;
 function getUpload() {
   if (!_uploadCache) {
     _uploadCache = require('../uploads/carImages').upload;
   }
   return _uploadCache;
 }
+// Lazy-resolved S3 client + DeleteObjectCommand for WR-01 cleanup. Behind
+// the same lazy gate as getUpload so test envs without AWS credentials do
+// not pay construction cost (and do not load @aws-sdk at all unless the
+// Edit route is exercised).
+function getS3Cleanup() {
+  if (!_s3Cache) {
+    const { s3 } = require('../uploads/carImages');
+    const { DeleteObjectCommand } = require('@aws-sdk/client-s3');
+    _s3Cache = { s3, DeleteObjectCommand };
+  }
+  return _s3Cache;
+}
+
+// WR-01 mitigation: delete S3 objects uploaded by multer-S3 when the Edit
+// handler returns an error after multer ran. Without this, orphan objects
+// accumulate forever (no cleanup pass exists in the codebase). Storage cost
+// grows; potentially a malicious admin who got past the auth chain but failed
+// Zod validation can leave files in the bucket.
+//
+// SCOPE: covers Zod-failure + service-error paths in the Edit handler.
+// DOES NOT cover the denySelfModerationListing middleware rejection or the
+// listing-not-found rejection — multer ran first, but the middleware
+// terminates the response without giving us a hook. A future plan can either
+// (a) move multer storage to memory + push to S3 after all validation, or
+// (b) wrap denySelfModerationListing to call cleanupUploaded on the way out.
+// Mark as known gap in 08-VERIFICATION.md if not addressed by this fix-up.
+async function cleanupUploaded(req) {
+  if (!req.files || !req.files.length) return;
+  const { s3, DeleteObjectCommand } = getS3Cleanup();
+  const bucket = process.env.AWS_BUCKET_NAME;
+  if (!bucket) return; // misconfigured env — nothing safe to delete
+  await Promise.allSettled(req.files.map((f) =>
+    s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: f.key }))
+  ));
+}
+
 // Edit-route multipart middleware: delegates to upload.array('images', 25)
 // from the lazy-loaded carImages module. Express middleware shape (req, res,
 // next) → calling the returned multer middleware closure.
@@ -229,6 +266,10 @@ router.patch(
   async (req, res) => {
   const parsed = schemas.editListingSchema.safeParse(req.body || {});
   if (!parsed.success) {
+    // WR-01: delete any files multer already pushed to S3 — Zod rejection
+    // would otherwise orphan them. Best-effort: a delete failure does not
+    // override the response status the admin sees.
+    await cleanupUploaded(req).catch(() => {});
     const unknownIssue = parsed.error.issues.find((i) => i.code === 'unrecognized_keys');
     if (unknownIssue) {
       return res.status(400).json({ error: 'invalid_field', fields: unknownIssue.keys || [] });
@@ -245,6 +286,10 @@ router.patch(
     });
     return res.json({ ok: true, listing: result.listing, action: result.action });
   } catch (err) {
+    // WR-01: service-side rejection (no_changes, invalid_make, invalid_model,
+    // listing_not_found, invalid_payload, etc.) leaves freshly-uploaded files
+    // orphaned. Best-effort delete before returning the error response.
+    await cleanupUploaded(req).catch(() => {});
     return handleListingServiceError(err, res, 'editListing');
   }
 });
