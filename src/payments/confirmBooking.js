@@ -28,7 +28,15 @@ const LogisticsPartner = require('../models/LogisticsPartner');
 // class moved into refundAndThrow.js to avoid circular require; re-exported below
 // for back-compat (server.js:1061 instanceof + existing test
 // __tests__/enforcement/confirmBooking.transaction.test.js require unchanged).
-const { refundAndThrow, ProviderSuspendedError } = require('./refundAndThrow');
+// Phase 9 Plan 09-05 — ListingNotAvailableError pulled from the SAME canonical
+// neighbor module per W-7 so the class object referenced by `throw new
+// ListingNotAvailableError(...)` here matches the class referenced by
+// `if (err instanceof ListingNotAvailableError)` in server.js (Plan 04).
+const { refundAndThrow, ListingNotAvailableError, ProviderSuspendedError } = require('./refundAndThrow');
+// Phase 9 Plan 09-05 — LISTING_STATUS_POLICY supplies the D-11 banner field for
+// the 409 listing_not_available body (consistent with the cart-add gate in
+// Plan 09-04 server.js:1118 — single source of truth for banner copy).
+const { LISTING_STATUS_POLICY } = require('../moderation/listingCapabilities');
 // ServiceOrder stays inline in server.js per Phase 1 D-02; resolve lazily inside
 // the function body via mongoose.model('ServiceOrder') so this module works
 // whether server.js has loaded yet (test isolation).
@@ -72,6 +80,7 @@ function generateOrderNumber() {
  * @param {Array<{providerUid: string, providerType: 'broker'|'logistics', service: object}>} args.items
  * @returns {Promise<{ car: object, orders: Array<object> }>}
  * @throws {ProviderSuspendedError} with { providerUid, refundId, refundFailed }
+ * @throws {ListingNotAvailableError} with { listingStatus, reasonCategory, banner, refundId, refundFailed } — Phase 9 LENF-03 (Plan 09-05); thrown when car.status !== 'active' inside the transaction
  * @throws {Error} 'invalid_payment_intent' if PI.status !== 'succeeded' (no refund — no charge)
  * @throws {Error} 'car_not_found' if carId resolves to null
  */
@@ -170,9 +179,16 @@ async function confirmBooking({ stripe, paymentIntentId, carId, buyerUid, items 
         };
       }
 
-      // ---- c. Seller re-check + car flip ---------------------------------
+      // ---- c. Seller re-check + listing-status re-check + car flip -------
+      // Phase 9 LENF-03 (Plan 09-05): the Car refetch chains BOTH bypass flags
+      // below (D-12 / Pitfall 1) — without the listing-status bypass, the Plan
+      // 02 hide hook would 404 a suspended listing inside the transaction and
+      // the buyer would be charged with no refund. The third in-txn check on
+      // car.status === 'active' (D-13) routes through refundAndThrow with the
+      // listing_not_available discriminator → ListingNotAvailableError throw →
+      // server.js 409 mapping (Plan 04).
       const car = await Car.findById(carId)
-        .setOptions({ includeAllUsers: true })
+        .setOptions({ includeAllUsers: true, includeAllListingStatuses: true })
         .session(session);
       if (!car) {
         throw new Error('car_not_found');
@@ -190,6 +206,21 @@ async function confirmBooking({ stripe, paymentIntentId, carId, buyerUid, items 
         await refundAndThrow(stripe, paymentIntentId, {
           error: 'provider_suspended',
           providerUid: car.sellerId,
+        });
+      }
+
+      // Phase 9 LENF-03 — third TOCTOU dimension: listing status (D-13).
+      // Runs AFTER the seller checks (D-13 ordering: cheaper seller checks
+      // first; non-active seller + non-active listing routes through the
+      // provider_suspended refund path, preserving v1.0 semantics for the
+      // seller dimension).
+      if (car.status !== 'active') {
+        const banner = LISTING_STATUS_POLICY[car.status]?.banner ?? null;
+        await refundAndThrow(stripe, paymentIntentId, {
+          error: 'listing_not_available',
+          listingStatus: car.status,
+          reasonCategory: car.moderationReason,
+          banner,
         });
       }
 
