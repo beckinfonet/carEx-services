@@ -131,6 +131,22 @@ async function editListing({ adminUid, adminEmail, carId, fields, uploadedFiles 
   // Re-resolved makeName / modelName feed the changeSet so the denormalized
   // copies on Car stay consistent (mirrors server.js:792-795). Admin cannot
   // send makeName/modelName directly — they're derived from the validated docs.
+  // WR-04: make/model must be changed together. Allowing makeId without
+  // modelId (or vice versa) lets admin produce a denormalized Car doc whose
+  // makeName/modelName describe a non-existent combination (e.g., makeId
+  // points to Toyota but modelId still references the previous Honda Civic
+  // — public listing renders as "Toyota Civic"). Throw invalid_field with
+  // both names so the mobile UI can highlight the pair. (Note: the seller
+  // PUT in server.js has the same defect but is out of scope per D-A-1 —
+  // we tighten the admin path only.)
+  const hasMakeId = fields.makeId !== undefined;
+  const hasModelId = fields.modelId !== undefined;
+  if (hasMakeId !== hasModelId) {
+    const err = new ListingServiceError('invalid_field');
+    err.fields = ['makeId', 'modelId'];
+    throw err;
+  }
+
   let resolvedMakeName, resolvedModelName;
   if (fields.makeId) {
     // CR-03: pre-validate ObjectId shape so a malformed makeId surfaces as
