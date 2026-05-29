@@ -119,4 +119,29 @@ router.patch('/:carId/archive', denySelfModerationListing, async (req, res) => {
   }
 });
 
+// Phase 8 Plan 04 (LADM-04): PATCH /:carId/delete
+// Same middleware composition as Suspend/Archive (denySelfModerationListing
+// first, JSON body only — D-D-1 multer joins only on Edit). deleteListingSchema
+// is .strict() so unknown top-level keys reject as invalid_payload at parse
+// time. LADM-04 invariant: this is a SOFT-delete — the service flips
+// Car.status to 'deleted'; the document is NOT removed from MongoDB.
+router.patch('/:carId/delete', denySelfModerationListing, async (req, res) => {
+  const parsed = schemas.deleteListingSchema.safeParse(req.body || {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'invalid_payload', issues: parsed.error.issues });
+  }
+  try {
+    const result = await service.deleteListing({
+      adminUid: req.admin.uid,
+      adminEmail: req.admin.email,
+      carId: req.params.carId,
+      reasonCategory: parsed.data.reasonCategory,
+      note: parsed.data.note,
+    });
+    return res.json({ ok: true, listing: result.listing, action: result.action });
+  } catch (err) {
+    return handleListingServiceError(err, res, 'delete');
+  }
+});
+
 module.exports = router;
