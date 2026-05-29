@@ -47,12 +47,107 @@ async function editListing({ adminUid, adminEmail, carId, fields, uploadedFiles 
   throw new ListingServiceError('not_implemented');
 }
 
+// --- suspendListing (LADM-02) ------------------------------------------
+//
+// Atomicity contract (D-06, D-08, D-B-1, D-15):
+//   1. Defensive arg-check at function top — missing required args → 400
+//      invalid_payload (router-level Zod is the first wall; this guard is
+//      the second so direct service callers cannot bypass).
+//   2. Read current Car OUTSIDE the transaction (fast-path same-state guard
+//      per D-B-1). Chains BOTH setOptions bypass flags so the read survives
+//      Phase 3's seller-cascade pre(/^find/) hook (Car.js:63-95) AND Phase 9's
+//      future listing-status hide hook without retroactive edits (Pitfall 5).
+//   3. Open session, enter withTransaction:
+//      a. Insert ListingModerationAction FIRST (D-08 audit-then-Car ordering).
+//         Array form REQUIRED by Mongoose to accept { session } — single-doc
+//         create(doc, { session }) silently drops { session } and lands the
+//         audit row OUTSIDE the transaction (Pitfall 2).
+//      b. Update Car (status + 4 moderation-stamp fields) with { session }.
+//         If updated.matchedCount !== 1 → throw listing_not_found so the
+//         transaction aborts (covers TOCTOU between pre-read + update).
+//   4. session.endSession() in finally.
+//   5. Build the D-02 thin response from in-memory state (no second
+//      Car.findById round-trip — every field needed is already known from
+//      the $set payload we just committed).
 async function suspendListing({ adminUid, adminEmail, carId, reasonCategory, note }) {
-  // Wave 2 (LADM-02) will implement. Same-state guard (D-B-1) → audit row
-  // with action='suspend', fromStatus=<current>, toStatus='suspended',
-  // reasonCategory required → Car.status='suspended' + moderation* fields.
-  void adminUid; void adminEmail; void carId; void reasonCategory; void note;
-  throw new ListingServiceError('not_implemented');
+  if (!adminUid || !adminEmail || !carId || !reasonCategory) {
+    throw new ListingServiceError('invalid_payload');
+  }
+
+  // Pre-transaction read: confirm listing exists + detect same-state idempotency
+  // violation (D-B-1). Both setOptions flags chained per Pitfall 5.
+  const current = await Car.findById(carId)
+    .setOptions({ includeAllListingStatuses: true, includeAllUsers: true })
+    .lean();
+  if (!current) {
+    throw new ListingServiceError('listing_not_found');
+  }
+  if (current.status === 'suspended') {
+    throw new ListingServiceError('already_in_state');
+  }
+
+  const moderatedAt = new Date();
+  const session = await mongoose.startSession();
+  let insertedAction;
+  try {
+    await session.withTransaction(async () => {
+      // 1. Insert audit row FIRST (D-08 ordering). Array form mandatory (Pitfall 2).
+      const [action] = await ListingModerationAction.create([{
+        listingId: carId,
+        sellerUid: current.sellerId,
+        adminUid,
+        adminEmail,
+        action: 'suspend',
+        fromStatus: current.status,
+        toStatus: 'suspended',
+        reasonCategory,
+        reasonNote: note ?? null,
+        fieldDiff: null,
+      }], { session });
+      insertedAction = action;
+
+      // 2. Update Car SECOND (D-15 stamp moderationReason/moderationNote/
+      //    moderatedBy/moderatedAt alongside the status flip).
+      const updated = await Car.updateOne(
+        { _id: carId },
+        {
+          $set: {
+            status: 'suspended',
+            moderationReason: reasonCategory,
+            moderationNote: note ?? null,
+            moderatedBy: adminUid,
+            moderatedAt,
+          },
+        },
+        { session }
+      );
+      if (updated.matchedCount !== 1) {
+        throw new ListingServiceError('listing_not_found');
+      }
+    });
+  } finally {
+    await session.endSession();
+  }
+
+  // D-02 thin projection — listing payload carries ONLY the 4 transition-
+  // relevant fields, not the full Car doc. action payload carries the 5
+  // audit-row identifiers. Both key sets are locked by the test's exact
+  // Object.keys() assertion so a future refactor cannot widen the response.
+  return {
+    listing: {
+      _id: carId,
+      status: 'suspended',
+      moderatedBy: adminUid,
+      moderatedAt,
+    },
+    action: {
+      _id: insertedAction._id.toString(),
+      action: 'suspend',
+      fromStatus: current.status,
+      toStatus: 'suspended',
+      createdAt: insertedAction.createdAt,
+    },
+  };
 }
 
 async function archiveListing({ adminUid, adminEmail, carId, reasonCategory, note }) {
