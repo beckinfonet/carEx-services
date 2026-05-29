@@ -144,4 +144,30 @@ router.patch('/:carId/delete', denySelfModerationListing, async (req, res) => {
   }
 });
 
+// Phase 8 Plan 05 (LADM-05): PATCH /:carId/restore
+// Same middleware composition as Suspend/Archive/Delete (denySelfModerationListing
+// first — D-04 applies even on Restore; admin can't restore their own listing).
+// JSON body only (D-D-1 — multer joins only on Edit). restoreListingSchema is
+// .strict() and accepts ONLY { note? } — no reasonCategory (D-C symmetry).
+// The dispatch object intentionally OMITS any reasonCategory field; the service
+// signature has no reasonCategory parameter. Restore on already-active throws
+// not_moderated (Pitfall 10 — distinct from the cross-action no-op code).
+router.patch('/:carId/restore', denySelfModerationListing, async (req, res) => {
+  const parsed = schemas.restoreListingSchema.safeParse(req.body || {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'invalid_payload', issues: parsed.error.issues });
+  }
+  try {
+    const result = await service.restoreListing({
+      adminUid: req.admin.uid,
+      adminEmail: req.admin.email,
+      carId: req.params.carId,
+      note: parsed.data.note,
+    });
+    return res.json({ ok: true, listing: result.listing, action: result.action });
+  } catch (err) {
+    return handleListingServiceError(err, res, 'restore');
+  }
+});
+
 module.exports = router;
