@@ -891,12 +891,6 @@ async function restoreListing({ adminUid, adminEmail, carId, note }) {
   };
 }
 
-// Touch mongoose + the audit/Car models so the require() above isn't elided
-// by a future tree-shaker; Wave 2/3 will exercise them via withTransaction().
-// This is a no-op at runtime and provides a single grep-stable surface for
-// "what does this module depend on?".
-void mongoose; void Car; void ListingModerationAction;
-
 module.exports = {
   editListing,
   suspendListing,
