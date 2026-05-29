@@ -77,7 +77,9 @@ const editListingSchema = z.object({
   wheelbase: z.string().optional(),
   fuel: z.string().optional(),
   currency: z.string().optional(),
-  description: z.string().optional(),
+  // WR-07: cap description to prevent abuse (a 10 MB description goes
+  // straight into MongoDB and can blow past doc-size limits or balloon DB cost).
+  description: z.string().max(10000).optional(),
   bodyType: z.string().optional(),
   engine: z.string().optional(),
   transmission: z.string().optional(),
@@ -95,8 +97,13 @@ const editListingSchema = z.object({
   mileage: z.coerce.number().int().nonnegative().optional(),
   seats: z.coerce.number().int().nonnegative().optional(),
   doors: z.coerce.number().int().nonnegative().optional(),
-  // knownIssues — mirrors seller PUT's JSON-string fallback at server.js:799-804
-  knownIssues: z.union([z.string(), z.array(z.string())]).optional(),
+  // knownIssues — mirrors seller PUT's JSON-string fallback at server.js:799-804.
+  // WR-07: cap both the JSON-string form and the array form to prevent
+  // unbounded payloads from ballooning the audit fieldDiff and Car doc.
+  knownIssues: z.union([
+    z.string().max(20000),
+    z.array(z.string().max(500)).max(50),
+  ]).optional(),
   // existingImageUrls — JSON-stringified array from multipart per server.js:779-782
   existingImageUrls: z.string().optional(),
 }).strict();
