@@ -16,7 +16,51 @@
 
 const express = require('express');
 
+// Phase 8 Plan 02 (LADM-02): wire the Suspend route. Adds 3 module-level
+// requires — service / schemas / self-moderation middleware. NO multer
+// `upload` import here: per D-D-1 multer mounts ONLY on the Edit route
+// (Plan 08-06 lands `upload` alongside the Edit route).
+const service = require('./listingService');
+const schemas = require('./listingSchemas');
+const { denySelfModerationListing } = require('./denySelfModerationListing');
+
 const router = express.Router();
+
+// Known service-layer error codes that listingService.js throws. Anything
+// outside this set bubbles up as 500 internal_error via handleListingServiceError
+// (D-03 + Pitfall 1 — keep the registry full so downstream Wave 2/3 plans don't
+// have to amend it; they just start throwing the code).
+const KNOWN_LISTING_ERRORS = new Set([
+  'listing_not_found',           // 08-02 (Suspend) + 08-03..08-06
+  'invalid_transition',          // forward-compat per D-B-2; v1.1 never emits — reserved for future restricted-matrix super-admin tier
+  'already_in_state',            // 08-02 (Suspend) + 08-03 (Archive)
+  'not_moderated',               // 08-05 (Restore) — fires when target is already 'active'
+  'invalid_field',               // 08-06 (Edit) — unknown field in admin Edit payload
+  'no_changes',                  // 08-06 (Edit) — no-op submit
+  'invalid_payload',             // service-level defensive guard (router-level Zod is the first wall)
+  'cannot_moderate_own_listing', // denySelfModerationListing middleware
+  'invalid_make',                // 08-06 (Edit) — makeId not found
+  'invalid_model',               // 08-06 (Edit) — modelId not found
+]);
+
+function handleListingServiceError(err, res, tag) {
+  // err.code is the canonical signal (set by ListingServiceError constructor);
+  // fall back to err.message so a plain Error thrown by accident still hits the
+  // KNOWN set lookup with reasonable behavior.
+  const code = err.code || err.message;
+  if (KNOWN_LISTING_ERRORS.has(code)) {
+    const body = { error: code };
+    // D-05 enrichment for Edit's invalid_field: surface offending field names
+    // so the mobile UI can highlight them.
+    if (code === 'invalid_field' && Array.isArray(err.fields)) {
+      body.fields = err.fields;
+    }
+    return res.status(400).json(body);
+  }
+  // eslint-disable-next-line no-console
+  console.error(`[listing-moderation] ${tag} error:`, err);
+  return res.status(500).json({ error: 'internal_error', message: err.message });
+}
 
 // Phase 7 scaffold route — preserves the v1.0 /ping contract so the
 // LSEC-01/02 middleware test and LSEC-03 rate-limit test can drive the full
@@ -24,6 +68,30 @@ const router = express.Router();
 // to the v1.0 user-mod /ping response.
 router.get('/ping', (req, res) => {
   res.json({ ok: true });
+});
+
+// Phase 8 Plan 02 (LADM-02): PATCH /:carId/suspend
+// Mount order: denySelfModerationListing first (sellerId === adminUid → 400
+// cannot_moderate_own_listing), then handler. JSON body only (D-D-1 — multer
+// joins on the Edit route only). suspendListingSchema is .strict() so unknown
+// top-level keys reject as invalid_payload at parse time.
+router.patch('/:carId/suspend', denySelfModerationListing, async (req, res) => {
+  const parsed = schemas.suspendListingSchema.safeParse(req.body || {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'invalid_payload', issues: parsed.error.issues });
+  }
+  try {
+    const result = await service.suspendListing({
+      adminUid: req.admin.uid,
+      adminEmail: req.admin.email,
+      carId: req.params.carId,
+      reasonCategory: parsed.data.reasonCategory,
+      note: parsed.data.note,
+    });
+    return res.json({ ok: true, listing: result.listing, action: result.action });
+  } catch (err) {
+    return handleListingServiceError(err, res, 'suspend');
+  }
 });
 
 module.exports = router;
