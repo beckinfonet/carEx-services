@@ -377,31 +377,55 @@ async function suspendListing({ adminUid, adminEmail, carId, reasonCategory, not
     throw new ListingServiceError('listing_not_found');
   }
 
-  // Pre-transaction read: confirm listing exists + detect same-state idempotency
-  // violation (D-B-1). Both setOptions flags chained per Pitfall 5.
-  const current = await Car.findById(carId)
+  // Pre-transaction read: fast-path same-state + listing-not-found check.
+  // Both setOptions flags chained per Pitfall 5. WR-02: this is a FAST-PATH
+  // only — the authoritative same-state guard + audit row's fromStatus are
+  // computed from a SECOND read INSIDE the transaction below to close the
+  // TOCTOU race against a concurrent admin transition.
+  const preCheck = await Car.findById(carId)
     .setOptions({ includeAllListingStatuses: true, includeAllUsers: true })
     .lean();
-  if (!current) {
+  if (!preCheck) {
     throw new ListingServiceError('listing_not_found');
   }
-  if (current.status === 'suspended') {
+  if (preCheck.status === 'suspended') {
     throw new ListingServiceError('already_in_state');
   }
 
   const moderatedAt = new Date();
   const session = await mongoose.startSession();
   let insertedAction;
+  let fromStatusAtCommit;
+  let sellerIdAtCommit;
   try {
     await session.withTransaction(async () => {
+      // WR-02: Re-read INSIDE the transaction to get the authoritative
+      // status for the audit row's fromStatus and to detect concurrent
+      // transitions that happened between the pre-check and the txn open.
+      // Without this, two admins racing to transition the same listing could
+      // both pass the pre-check, both write audit rows, and the second
+      // admin's fromStatus would be stale.
+      const current = await Car.findById(carId)
+        .setOptions({ includeAllListingStatuses: true, includeAllUsers: true })
+        .session(session)
+        .lean();
+      if (!current) {
+        throw new ListingServiceError('listing_not_found');
+      }
+      if (current.status === 'suspended') {
+        throw new ListingServiceError('already_in_state');
+      }
+      fromStatusAtCommit = current.status;
+      sellerIdAtCommit = current.sellerId;
+
       // 1. Insert audit row FIRST (D-08 ordering). Array form mandatory (Pitfall 2).
       const [action] = await ListingModerationAction.create([{
         listingId: carId,
-        sellerUid: current.sellerId,
+        sellerUid: sellerIdAtCommit,
         adminUid,
         adminEmail,
         action: 'suspend',
-        fromStatus: current.status,
+        fromStatus: fromStatusAtCommit,
         toStatus: 'suspended',
         reasonCategory,
         reasonNote: note ?? null,
@@ -410,9 +434,12 @@ async function suspendListing({ adminUid, adminEmail, carId, reasonCategory, not
       insertedAction = action;
 
       // 2. Update Car SECOND (D-15 stamp moderationReason/moderationNote/
-      //    moderatedBy/moderatedAt alongside the status flip).
+      //    moderatedBy/moderatedAt alongside the status flip). Conditional
+      //    filter on `status: fromStatusAtCommit` so a concurrent transition
+      //    that snuck in between the in-txn read and this update aborts the
+      //    transaction (matchedCount !== 1 → throw).
       const updated = await Car.updateOne(
-        { _id: carId },
+        { _id: carId, status: fromStatusAtCommit },
         {
           $set: {
             status: 'suspended',
@@ -446,7 +473,7 @@ async function suspendListing({ adminUid, adminEmail, carId, reasonCategory, not
     action: {
       _id: insertedAction._id.toString(),
       action: 'suspend',
-      fromStatus: current.status,
+      fromStatus: fromStatusAtCommit,
       toStatus: 'suspended',
       createdAt: insertedAction.createdAt,
     },
@@ -472,31 +499,49 @@ async function archiveListing({ adminUid, adminEmail, carId, reasonCategory, not
     throw new ListingServiceError('listing_not_found');
   }
 
-  // Pre-transaction read: confirm listing exists + detect same-state idempotency
-  // violation (D-B-1). Both setOptions flags chained per Pitfall 5.
-  const current = await Car.findById(carId)
+  // Pre-transaction read: fast-path same-state + listing-not-found check.
+  // Both setOptions flags chained per Pitfall 5. WR-02: this is a FAST-PATH
+  // only — authoritative same-state guard + audit row's fromStatus come from
+  // a SECOND read INSIDE the transaction to close the TOCTOU race.
+  const preCheck = await Car.findById(carId)
     .setOptions({ includeAllListingStatuses: true, includeAllUsers: true })
     .lean();
-  if (!current) {
+  if (!preCheck) {
     throw new ListingServiceError('listing_not_found');
   }
-  if (current.status === 'archived') {
+  if (preCheck.status === 'archived') {
     throw new ListingServiceError('already_in_state');
   }
 
   const moderatedAt = new Date();
   const session = await mongoose.startSession();
   let insertedAction;
+  let fromStatusAtCommit;
+  let sellerIdAtCommit;
   try {
     await session.withTransaction(async () => {
+      // WR-02: re-read inside the txn (see suspendListing for full rationale).
+      const current = await Car.findById(carId)
+        .setOptions({ includeAllListingStatuses: true, includeAllUsers: true })
+        .session(session)
+        .lean();
+      if (!current) {
+        throw new ListingServiceError('listing_not_found');
+      }
+      if (current.status === 'archived') {
+        throw new ListingServiceError('already_in_state');
+      }
+      fromStatusAtCommit = current.status;
+      sellerIdAtCommit = current.sellerId;
+
       // 1. Insert audit row FIRST (D-08 ordering). Array form mandatory (Pitfall 2).
       const [action] = await ListingModerationAction.create([{
         listingId: carId,
-        sellerUid: current.sellerId,
+        sellerUid: sellerIdAtCommit,
         adminUid,
         adminEmail,
         action: 'archive',
-        fromStatus: current.status,
+        fromStatus: fromStatusAtCommit,
         toStatus: 'archived',
         reasonCategory,
         reasonNote: note ?? null,
@@ -505,9 +550,10 @@ async function archiveListing({ adminUid, adminEmail, carId, reasonCategory, not
       insertedAction = action;
 
       // 2. Update Car SECOND (D-15 stamp moderationReason/moderationNote/
-      //    moderatedBy/moderatedAt alongside the status flip).
+      //    moderatedBy/moderatedAt alongside the status flip). Conditional
+      //    on the in-txn fromStatus so concurrent transitions abort.
       const updated = await Car.updateOne(
-        { _id: carId },
+        { _id: carId, status: fromStatusAtCommit },
         {
           $set: {
             status: 'archived',
@@ -539,7 +585,7 @@ async function archiveListing({ adminUid, adminEmail, carId, reasonCategory, not
     action: {
       _id: insertedAction._id.toString(),
       action: 'archive',
-      fromStatus: current.status,
+      fromStatus: fromStatusAtCommit,
       toStatus: 'archived',
       createdAt: insertedAction.createdAt,
     },
@@ -570,31 +616,49 @@ async function deleteListing({ adminUid, adminEmail, carId, reasonCategory, note
     throw new ListingServiceError('listing_not_found');
   }
 
-  // Pre-transaction read: confirm listing exists + detect same-state idempotency
-  // violation (D-B-1). Both setOptions flags chained per Pitfall 5.
-  const current = await Car.findById(carId)
+  // Pre-transaction read: fast-path same-state + listing-not-found check.
+  // Both setOptions flags chained per Pitfall 5. WR-02: this is a FAST-PATH
+  // only — authoritative same-state guard + audit row's fromStatus come from
+  // a SECOND read INSIDE the transaction to close the TOCTOU race.
+  const preCheck = await Car.findById(carId)
     .setOptions({ includeAllListingStatuses: true, includeAllUsers: true })
     .lean();
-  if (!current) {
+  if (!preCheck) {
     throw new ListingServiceError('listing_not_found');
   }
-  if (current.status === 'deleted') {
+  if (preCheck.status === 'deleted') {
     throw new ListingServiceError('already_in_state');
   }
 
   const moderatedAt = new Date();
   const session = await mongoose.startSession();
   let insertedAction;
+  let fromStatusAtCommit;
+  let sellerIdAtCommit;
   try {
     await session.withTransaction(async () => {
+      // WR-02: re-read inside the txn (see suspendListing for full rationale).
+      const current = await Car.findById(carId)
+        .setOptions({ includeAllListingStatuses: true, includeAllUsers: true })
+        .session(session)
+        .lean();
+      if (!current) {
+        throw new ListingServiceError('listing_not_found');
+      }
+      if (current.status === 'deleted') {
+        throw new ListingServiceError('already_in_state');
+      }
+      fromStatusAtCommit = current.status;
+      sellerIdAtCommit = current.sellerId;
+
       // 1. Insert audit row FIRST (D-08 ordering). Array form mandatory (Pitfall 2).
       const [action] = await ListingModerationAction.create([{
         listingId: carId,
-        sellerUid: current.sellerId,
+        sellerUid: sellerIdAtCommit,
         adminUid,
         adminEmail,
         action: 'delete',
-        fromStatus: current.status,
+        fromStatus: fromStatusAtCommit,
         toStatus: 'deleted',
         reasonCategory,
         reasonNote: note ?? null,
@@ -605,9 +669,10 @@ async function deleteListing({ adminUid, adminEmail, carId, reasonCategory, note
       // 2. Update Car SECOND (D-15 stamp moderationReason/moderationNote/
       //    moderatedBy/moderatedAt alongside the status flip). SOFT-DELETE:
       //    Car.updateOne ONLY — NO call to any Mongoose document-removal API
-      //    on Car anywhere in this function (LADM-04 invariant).
+      //    on Car anywhere in this function (LADM-04 invariant). Conditional
+      //    on the in-txn fromStatus so concurrent transitions abort.
       const updated = await Car.updateOne(
-        { _id: carId },
+        { _id: carId, status: fromStatusAtCommit },
         {
           $set: {
             status: 'deleted',
@@ -639,7 +704,7 @@ async function deleteListing({ adminUid, adminEmail, carId, reasonCategory, note
     action: {
       _id: insertedAction._id.toString(),
       action: 'delete',
-      fromStatus: current.status,
+      fromStatus: fromStatusAtCommit,
       toStatus: 'deleted',
       createdAt: insertedAction.createdAt,
     },
@@ -696,40 +761,59 @@ async function restoreListing({ adminUid, adminEmail, carId, note }) {
     throw new ListingServiceError('listing_not_found');
   }
 
-  // Pre-transaction read: confirm listing exists + detect already-active
-  // (Pitfall 10) BEFORE opening a session. Both setOptions flags chained
-  // per Pitfall 5 (Phase 3 seller-cascade hook + Phase 9 listing-status hook
-  // bypass — admin can restore a deleted/archived/suspended listing even
-  // when its seller is suspended).
-  const current = await Car.findById(carId)
+  // Pre-transaction read: fast-path not-moderated + listing-not-found check.
+  // Both setOptions flags chained per Pitfall 5. WR-02: this is a FAST-PATH
+  // only — authoritative status guard + audit row's fromStatus come from a
+  // SECOND read INSIDE the transaction to close the TOCTOU race against a
+  // concurrent transition (e.g., another admin re-moderates the listing
+  // between this read and the txn open).
+  const preCheck = await Car.findById(carId)
     .setOptions({ includeAllListingStatuses: true, includeAllUsers: true })
     .lean();
-  if (!current) {
+  if (!preCheck) {
     throw new ListingServiceError('listing_not_found');
   }
   // Pitfall 10: Restore on already-active throws not_moderated; the
   // cross-action no-op code (used by Suspend/Archive/Delete same-state) is
   // reserved for those three handlers. Distinct codes for distinct semantics
   // — not_moderated is the Restore-specific case.
-  if (current.status === 'active') {
+  if (preCheck.status === 'active') {
     throw new ListingServiceError('not_moderated');
   }
 
   const moderatedAt = new Date();
   const session = await mongoose.startSession();
   let insertedAction;
+  let fromStatusAtCommit;
+  let sellerIdAtCommit;
   try {
     await session.withTransaction(async () => {
+      // WR-02: re-read inside the txn so fromStatus reflects transactional
+      // truth; the conditional updateOne filter below aborts if a concurrent
+      // admin re-moderated/restored between read and write.
+      const current = await Car.findById(carId)
+        .setOptions({ includeAllListingStatuses: true, includeAllUsers: true })
+        .session(session)
+        .lean();
+      if (!current) {
+        throw new ListingServiceError('listing_not_found');
+      }
+      if (current.status === 'active') {
+        throw new ListingServiceError('not_moderated');
+      }
+      fromStatusAtCommit = current.status;
+      sellerIdAtCommit = current.sellerId;
+
       // 1. Insert audit row FIRST (D-08 ordering). Array form mandatory
       //    (Pitfall 2). reasonCategory: null per D-C — the historical reason
       //    lives on the prior audit row; this row records the inverse event.
       const [action] = await ListingModerationAction.create([{
         listingId: carId,
-        sellerUid: current.sellerId,
+        sellerUid: sellerIdAtCommit,
         adminUid,
         adminEmail,
         action: 'restore',
-        fromStatus: current.status,
+        fromStatus: fromStatusAtCommit,
         toStatus: 'active',
         reasonCategory: null,
         reasonNote: note ?? null,
@@ -746,9 +830,10 @@ async function restoreListing({ adminUid, adminEmail, carId, note }) {
       //    Do NOT "optimize" by preserving prior moderationReason/
       //    moderationNote — the test layer locks D-C-1, and stale reason
       //    text on an active listing leaks moderation history into public
-      //    surfaces.
+      //    surfaces. Conditional on the in-txn fromStatus so concurrent
+      //    transitions abort.
       const updated = await Car.updateOne(
-        { _id: carId },
+        { _id: carId, status: fromStatusAtCommit },
         {
           $set: {
             status: 'active',
@@ -783,7 +868,7 @@ async function restoreListing({ adminUid, adminEmail, carId, note }) {
     action: {
       _id: insertedAction._id.toString(),
       action: 'restore',
-      fromStatus: current.status,
+      fromStatus: fromStatusAtCommit,
       toStatus: 'active',
       createdAt: insertedAction.createdAt,
     },
