@@ -15,7 +15,7 @@ afterAll(async () => {
   await mongo.stop();
 });
 
-describe('Car.status (LDATA-01 + D-07 + D-08)', () => {
+describe('LDATA-01 / LDATA-02: Car.status + audit fields (D-07 + D-08)', () => {
   test('defaults status to "active" on new car', () => {
     const c = new Car({ sellerId: 'seller-1' });
     expect(c.status).toBe('active');

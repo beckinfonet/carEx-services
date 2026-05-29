@@ -41,7 +41,7 @@ afterAll(async () => {
   await mongo.stop();
 });
 
-describe('ListingModerationAction — append-only', () => {
+describe('LDATA-03: ListingModerationAction — append-only', () => {
   let ListingModerationAction;
   let seedId;
 
