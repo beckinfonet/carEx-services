@@ -100,27 +100,45 @@ async function seedFourStatusListings(sellerUid = 'seller-listing-status-1') {
 
 describe('LENF-01 pre(/^find/) listing-status hide hook (Plan 09-02 contract)', () => {
   // (a) — 09-LENF01-a
-  test.todo(
-    'Car.find({}) returns zero non-active listings by default (status=active only)'
-  );
+  test('Car.find({}) returns zero non-active listings by default (status=active only)', async () => {
+    await seedFourStatusListings();
+    const all = await Car.find({});
+    expect(all).toHaveLength(1);
+    expect(all[0].status).toBe('active');
+  });
 
   // (b) — 09-LENF01-b
-  test.todo(
-    'Car.find({}).setOptions({ includeAllListingStatuses: true }) returns all four statuses including deleted'
-  );
+  test('Car.find({}).setOptions({ includeAllListingStatuses: true }) returns all four statuses including deleted', async () => {
+    await seedFourStatusListings();
+    const all = await Car.find({}).setOptions({ includeAllListingStatuses: true });
+    expect(all).toHaveLength(4);
+    expect(all.map(c => c.status).sort()).toEqual([
+      'active',
+      'archived',
+      'deleted',
+      'suspended',
+    ]);
+  });
 
   // (c) — 09-LENF01-c (Pitfall 2 — $and combine for caller-provided status filter)
-  test.todo(
-    "Car.find({ status: 'deleted' }).setOptions({ includeAllListingStatuses: true }) returns deleted listings — confirms $and combine for caller filter (Pitfall 2)"
-  );
+  test("Car.find({ status: 'deleted' }).setOptions({ includeAllListingStatuses: true }) returns deleted listings — confirms $and combine for caller filter (Pitfall 2)", async () => {
+    await seedFourStatusListings();
+    const deleted = await Car.find({ status: 'deleted' }).setOptions({
+      includeAllListingStatuses: true,
+    });
+    expect(deleted).toHaveLength(1);
+    expect(deleted[0].status).toBe('deleted');
+  });
 
-  // (d) — 09-LENF01-d (route-level supertest)
-  test.todo(
-    'GET /api/cars route-level supertest returns zero non-active listings'
-  );
-
-  // Reference the seed helper so a future Plan 09-02 author has the fixture
-  // ready and lint doesn't flag it as unused. The actual call lives inside the
-  // tests Plan 09-02 lands.
-  void seedFourStatusListings;
+  // (d) — 09-LENF01-d (W-2 rename: empty intersection, NOT "filter is preserved")
+  test("non-admin querying non-active status: $and-combine produces empty intersection, returns 0 rows (defense in depth)", async () => {
+    await seedFourStatusListings();
+    // Without the bypass, the hook combines caller's { status: 'deleted' }
+    // with the default { status: 'active' } via $and — the intersection
+    // [{ status: 'deleted' }, { status: 'active' }] cannot match any doc.
+    // Defense in depth: a non-admin (or admin who forgot the bypass) querying
+    // a non-active status sees zero rows, never the requested non-active set.
+    const naive = await Car.find({ status: 'deleted' });
+    expect(naive).toHaveLength(0);
+  });
 });
