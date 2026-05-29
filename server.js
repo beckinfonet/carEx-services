@@ -26,6 +26,14 @@ const listingModerationRouter = require('./src/moderation/listingRouter');
 const { listingModerationRateLimiter } = require('./src/moderation/listingRateLimit');
 const { upload, s3 } = require('./src/uploads/carImages');
 const { confirmBooking: confirmBookingService, ProviderSuspendedError } = require('./src/payments/confirmBooking');
+// W-7: ListingNotAvailableError MUST be required from its canonical source
+// (./src/payments/refundAndThrow), NOT via a confirmBooking re-export. JS class
+// identity depends on referential equality of the class object across the
+// require graph; importing via re-export risks identity mismatch under module
+// caching with circular requires. Plan 09-05's confirmBooking step 4 throws
+// this same class (also imported from ./refundAndThrow) — both consumers
+// resolve to the same module path, so `instanceof` works at the boundary.
+const { ListingNotAvailableError } = require('./src/payments/refundAndThrow');
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -1089,10 +1097,33 @@ app.get('/api/payments/config', (req, res) => {
   res.json({ publishableKey: process.env.STRIPE_PUBLISHABLE_KEY });
 });
 
-app.post('/api/payments/create-payment-intent', attachAuthIfPresent, requireNotSuspended('create_order'), async (req, res) => {
+async function createPaymentIntentHandler(req, res) {
   try {
     const { currency = 'kgs', carId, buyerUid } = req.body;
     if (!buyerUid) return res.status(400).json({ message: 'buyerUid required' });
+
+    // Phase 9 LENF-03 cart-add gate (D-09) — fires BEFORE any Stripe API call.
+    // Re-reads listing status server-authoritatively so a stale client cart
+    // cannot drag a non-active listing into checkout. Per W-7, no charge is
+    // attempted when the listing is non-active.
+    if (carId) {
+      if (!mongoose.isValidObjectId(carId)) {
+        return res.status(404).json({ error: 'car_not_found' });
+      }
+      const car = await Car.findById(carId)
+        .setOptions({ includeAllListingStatuses: true })
+        .select('status moderationReason')
+        .lean();
+      if (car && car.status !== 'active') {
+        const banner = LISTING_STATUS_POLICY[car.status]?.banner ?? null;
+        return res.status(409).json({
+          error: 'listing_not_available',
+          listingStatus: car.status,
+          reasonCategory: car.moderationReason,
+          banner,
+        });
+      }
+    }
 
     const amount = currency === 'usd' ? BOOKING_FEE_USD : BOOKING_FEE_KGS;
     const stripeCurrency = currency === 'usd' ? 'usd' : 'kgs';
@@ -1113,7 +1144,9 @@ app.post('/api/payments/create-payment-intent', attachAuthIfPresent, requireNotS
     console.error('Create PaymentIntent error:', error);
     res.status(500).json({ message: error.message });
   }
-});
+}
+
+app.post('/api/payments/create-payment-intent', attachAuthIfPresent, requireNotSuspended('create_order'), createPaymentIntentHandler);
 
 // Thin delegation to the transactional confirm-booking service (Plan 03-04).
 // All Stripe + buyer/provider/seller re-check + car flip + ServiceOrder creation
@@ -1132,6 +1165,23 @@ app.post('/api/payments/confirm-booking', attachAuthIfPresent, requireNotSuspend
     });
     return res.json(result);
   } catch (err) {
+    // Phase 9 LENF-03 — ListingNotAvailableError branch (Pitfall 10: must
+    // precede ProviderSuspendedError because the two classes are SIBLINGS,
+    // not parent/child; if their order were swapped the ProviderSuspendedError
+    // arm would never see the listing-not-available case if a future
+    // refactor made them subclasses). Reachable once Plan 09-05 lands the
+    // in-transaction listing-status assertion that throws this class from
+    // src/payments/confirmBooking.js step 4.
+    if (err instanceof ListingNotAvailableError) {
+      return res.status(409).json({
+        error: 'listing_not_available',
+        listingStatus: err.listingStatus,
+        reasonCategory: err.reasonCategory,
+        banner: err.banner,
+        refundId: err.refundId,
+        refundFailed: err.refundFailed,
+      });
+    }
     if (err instanceof ProviderSuspendedError) {
       return res.status(409).json({
         error: 'provider_suspended',
@@ -1302,4 +1352,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, getCarDetailHandler };
+module.exports = { app, getCarDetailHandler, createPaymentIntentHandler };
