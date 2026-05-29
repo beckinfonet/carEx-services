@@ -23,6 +23,7 @@
 // Rejected attempts are logged via console.warn (D-05). Audit log
 // (ListingModerationAction) is reserved for SUCCESSFUL state changes.
 
+const mongoose = require('mongoose');
 const Car = require('../models/Car');
 
 async function denySelfModerationListing(req, res, next) {
@@ -35,6 +36,13 @@ async function denySelfModerationListing(req, res, next) {
   // enforces the seller-equality rule.
   if (!carId || !adminUid) {
     return next();
+  }
+
+  // WR-05: malformed carId (e.g., '/listings/garbage/suspend') would otherwise
+  // surface as a Mongoose CastError → 500 internal_error. D-04 do-not-leak
+  // symmetry: treat malformed and not-found identically (404 listing_not_found).
+  if (!mongoose.isValidObjectId(carId)) {
+    return res.status(404).json({ error: 'listing_not_found' });
   }
 
   try {

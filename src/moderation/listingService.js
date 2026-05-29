@@ -97,6 +97,11 @@ async function editListing({ adminUid, adminEmail, carId, fields, uploadedFiles 
   if (!adminUid || !adminEmail || !carId || !fields) {
     throw new ListingServiceError('invalid_payload');
   }
+  // WR-05: malformed carId → listing_not_found (D-04 do-not-leak symmetry).
+  // Without this, Mongoose CastError surfaces as 500 internal_error.
+  if (!mongoose.isValidObjectId(carId)) {
+    throw new ListingServiceError('listing_not_found');
+  }
 
   // ====================================================================
   // Section A — Pre-transaction read + status irrelevance (D-A-4).
@@ -367,6 +372,10 @@ async function suspendListing({ adminUid, adminEmail, carId, reasonCategory, not
   if (!adminUid || !adminEmail || !carId || !reasonCategory) {
     throw new ListingServiceError('invalid_payload');
   }
+  // WR-05: malformed carId → listing_not_found (D-04 do-not-leak symmetry).
+  if (!mongoose.isValidObjectId(carId)) {
+    throw new ListingServiceError('listing_not_found');
+  }
 
   // Pre-transaction read: confirm listing exists + detect same-state idempotency
   // violation (D-B-1). Both setOptions flags chained per Pitfall 5.
@@ -457,6 +466,10 @@ async function suspendListing({ adminUid, adminEmail, carId, reasonCategory, not
 async function archiveListing({ adminUid, adminEmail, carId, reasonCategory, note }) {
   if (!adminUid || !adminEmail || !carId || !reasonCategory) {
     throw new ListingServiceError('invalid_payload');
+  }
+  // WR-05: malformed carId → listing_not_found (D-04 do-not-leak symmetry).
+  if (!mongoose.isValidObjectId(carId)) {
+    throw new ListingServiceError('listing_not_found');
   }
 
   // Pre-transaction read: confirm listing exists + detect same-state idempotency
@@ -551,6 +564,10 @@ async function archiveListing({ adminUid, adminEmail, carId, reasonCategory, not
 async function deleteListing({ adminUid, adminEmail, carId, reasonCategory, note }) {
   if (!adminUid || !adminEmail || !carId || !reasonCategory) {
     throw new ListingServiceError('invalid_payload');
+  }
+  // WR-05: malformed carId → listing_not_found (D-04 do-not-leak symmetry).
+  if (!mongoose.isValidObjectId(carId)) {
+    throw new ListingServiceError('listing_not_found');
   }
 
   // Pre-transaction read: confirm listing exists + detect same-state idempotency
@@ -673,6 +690,10 @@ async function restoreListing({ adminUid, adminEmail, carId, note }) {
   // Defensive arg-check — NO reasonCategory required for Restore (D-C).
   if (!adminUid || !adminEmail || !carId) {
     throw new ListingServiceError('invalid_payload');
+  }
+  // WR-05: malformed carId → listing_not_found (D-04 do-not-leak symmetry).
+  if (!mongoose.isValidObjectId(carId)) {
+    throw new ListingServiceError('listing_not_found');
   }
 
   // Pre-transaction read: confirm listing exists + detect already-active
