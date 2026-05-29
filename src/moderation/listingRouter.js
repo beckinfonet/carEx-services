@@ -135,6 +135,34 @@ router.get('/ping', (req, res) => {
   res.json({ ok: true });
 });
 
+// Phase 10 Plan 03 (LUI-04): GET / — admin listing search.
+//
+// Full mounted path: GET /api/admin/moderation/listings (the parent mount in
+// server.js:925 already provides verifyIdToken + requireAdmin +
+// listingModerationRateLimiter; do NOT re-inline them here — double-mounting
+// the rate-limiter would break per-admin keying — see T-10-01 mitigation).
+//
+// No denySelfModerationListing on this read-only endpoint (D-04 only applies
+// to mutating PATCH routes).
+//
+// Mount position: BEFORE the parameterized PATCH routes below so Express does
+// not interpret `/` as a missing :carId; Express 5 routes match in registration
+// order so this stays robust under refactor.
+router.get('/', async (req, res) => {
+  const parsed = schemas.searchListingsQuerySchema.safeParse(req.query || {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'invalid_payload', issues: parsed.error.issues });
+  }
+  try {
+    const result = await service.searchListings(parsed.data);
+    return res.json(result);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error('[GET /api/admin/moderation/listings] error', err);
+    return res.status(500).json({ error: 'internal_error' });
+  }
+});
+
 // Phase 8 Plan 02 (LADM-02): PATCH /:carId/suspend
 // Mount order: denySelfModerationListing first (sellerId === adminUid → 400
 // cannot_moderate_own_listing), then handler. JSON body only (D-D-1 — multer

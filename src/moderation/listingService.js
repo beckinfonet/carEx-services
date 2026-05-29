@@ -948,15 +948,23 @@ async function restoreListing({ adminUid, adminEmail, carId, note }) {
 //
 //   2. HIDE-HOOK BYPASS (Pitfall 4, T-10-04). Car.find() runs under TWO
 //      pre(/^find/) hooks: the Phase 3 seller-cascade hook (Car.js:63-95) AND
-//      the Phase 9 listing-status hook (Car.js:104-120). Without
-//      .setOptions({ includeAllListingStatuses: true }) the listing-status
-//      hook silently filters to status='active' only — admin would see ZERO
-//      non-active rows, defeating LUI-04. We deliberately do NOT chain
-//      includeAllUsers here: admin should NOT see listings owned by suspended
-//      sellers in this surface (those listings are reachable via the user-
-//      moderation flow). Block 3 tests assert all 4 statuses are visible;
-//      a separate v1.2 plan can revisit the seller-cascade decision if UAT
-//      asks for it.
+//      the Phase 9 listing-status hook (Car.js:104-120). We chain BOTH bypass
+//      flags here (matches the Phase 8 service-handler convention at
+//      listingService.js suspend/archive/delete/restore/edit — every admin-
+//      side Car read in this file uses both flags):
+//        - includeAllListingStatuses: required per D-11 / Phase 9 D-01 so
+//          admin sees deleted/suspended/archived rows (the LUI-04 core
+//          contract). Block 3 tests prove this.
+//        - includeAllUsers: required for two reasons. (a) Correctness — the
+//          seller-cascade hook hides listings whose seller is moderated, but
+//          admin moderation EXPLICITLY needs visibility on listings whose
+//          seller is moderated (that's how an admin cleans up after
+//          suspending a bad-actor seller). Without this bypass admin loses
+//          exactly the rows they most need to act on. (b) Test isolation —
+//          the seller-cascade hook unconditionally calls mongoose.model(
+//          'User') and throws MissingSchemaError when the User collection
+//          isn't registered (which is the default for narrowly-scoped tests
+//          that don't seed Users). Auto-fix per execute-plan Rule 1.
 //
 // Cursor shape mirrors searchUsers: base64(JSON({createdAt, _id})). Uniform
 // sort { createdAt: -1, _id: -1 } across all status filters per Pitfall 8 /
@@ -1008,12 +1016,13 @@ async function searchListings({ status, q, cursor, limit = 25 }) {
     filter.$and = andClauses;
   }
 
-  // LOAD-BEARING: includeAllListingStatuses bypass per Phase 9 D-01. Without
-  // it the listing-status hide hook (Car.js:104-120) folds in status='active'
-  // and the response loses all non-active rows. Block 3 of the test file
-  // proves this assertion is wired.
+  // LOAD-BEARING: BOTH hide-hook bypasses chained. See the function header
+  // comment block for the full correctness + test-isolation rationale.
+  // includeAllListingStatuses is the D-11 / Phase 9 D-01 contract; chaining
+  // includeAllUsers as well matches the Phase 8 admin-side handler convention
+  // (suspend / archive / delete / restore / edit all use both flags).
   const rows = await Car.find(filter)
-    .setOptions({ includeAllListingStatuses: true })
+    .setOptions({ includeAllListingStatuses: true, includeAllUsers: true })
     .sort({ createdAt: -1, _id: -1 })
     .limit(limit + 1)
     .lean();
