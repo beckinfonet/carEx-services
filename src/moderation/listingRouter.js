@@ -57,7 +57,10 @@ const router = express.Router();
 // have to amend it; they just start throwing the code).
 const KNOWN_LISTING_ERRORS = new Set([
   'listing_not_found',           // 08-02 (Suspend) + 08-03..08-06
-  'invalid_transition',          // forward-compat per D-B-2; v1.1 never emits — reserved for future restricted-matrix super-admin tier
+  // IN-04: 'invalid_transition' was previously reserved here for a future
+  // restricted-matrix super-admin tier (D-B-2), but v1.1 never emits it and
+  // no test covers the mapping. Re-add when a future plan actually emits it
+  // AND includes a router-mapping unit test that proves the 400 shape.
   'already_in_state',            // 08-02 (Suspend) + 08-03 (Archive)
   'not_moderated',               // 08-05 (Restore) — fires when target is already 'active'
   'invalid_field',               // 08-06 (Edit) — unknown field in admin Edit payload
