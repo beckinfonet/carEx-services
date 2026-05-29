@@ -94,4 +94,29 @@ router.patch('/:carId/suspend', denySelfModerationListing, async (req, res) => {
   }
 });
 
+// Phase 8 Plan 03 (LADM-03): PATCH /:carId/archive
+// Same middleware composition as Suspend (denySelfModerationListing first,
+// JSON body only — D-D-1 multer joins only on Edit). archiveListingSchema is
+// .strict() so unknown top-level keys reject as invalid_payload at parse time.
+// inactive_seller is the canonical Archive reason but schema permits any
+// reasonCategory value (D-A-1 — admin discretion; no category-to-action map).
+router.patch('/:carId/archive', denySelfModerationListing, async (req, res) => {
+  const parsed = schemas.archiveListingSchema.safeParse(req.body || {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'invalid_payload', issues: parsed.error.issues });
+  }
+  try {
+    const result = await service.archiveListing({
+      adminUid: req.admin.uid,
+      adminEmail: req.admin.email,
+      carId: req.params.carId,
+      reasonCategory: parsed.data.reasonCategory,
+      note: parsed.data.note,
+    });
+    return res.json({ ok: true, listing: result.listing, action: result.action });
+  } catch (err) {
+    return handleListingServiceError(err, res, 'archive');
+  }
+});
+
 module.exports = router;
