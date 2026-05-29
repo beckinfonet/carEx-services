@@ -17,8 +17,10 @@ const LogisticsPartner = require('./src/models/LogisticsPartner');
 const { verifyIdToken } = require('./src/security/verifyIdToken');
 const { requireAdmin } = require('./src/security/requireAdmin');
 const { attachAuthIfPresent } = require('./src/security/attachAuthIfPresent');
+const { lookupAdminIfPresent } = require('./src/security/lookupAdminIfPresent');
 const { requireNotSuspended } = require('./src/security/requireNotSuspended');
 const { ensureBaseline } = require('./src/security/ensureBaseline');
+const { LISTING_STATUS_POLICY } = require('./src/moderation/listingCapabilities');
 const moderationRouter = require('./src/moderation/router');
 const listingModerationRouter = require('./src/moderation/listingRouter');
 const { listingModerationRateLimiter } = require('./src/moderation/listingRateLimit');
@@ -309,23 +311,95 @@ app.get('/api/cars', async (req, res) => {
   }
 });
 
-// Get single car by id
-app.get('/api/cars/:id', async (req, res) => {
+// Get single car by id — Phase 9 LENF-02 status-aware handler (D-08).
+//
+// Branches on `!!req.admin` (set by lookupAdminIfPresent when the verified
+// caller email matches an AdminUser doc) across 4 mutually exclusive paths:
+//   Path A — admin + non-active listing -> full doc + moderationBadge
+//   Path B — admin + active listing     -> full doc (NO moderationBadge key)
+//   Path C — non-admin + active listing -> existing response shape verbatim
+//   Path D — non-admin + non-active     -> D-05 thin payload allowlist
+//
+// Bypasses the Plan 09-02 hide hook via setOptions({ includeAllListingStatuses:
+// true }) so the lookup itself succeeds for ANY status; response-shape branching
+// is what enforces the per-status contract.
+//
+// W-6: extracted as a named function so the LENF-02 supertest mounts the
+// production handler directly — divergence between test and prod is impossible
+// by construction.
+async function getCarDetailHandler(req, res) {
   try {
-    const car = await Car.findById(req.params.id).lean();
+    // Pitfall 6: malformed ObjectId -> 404, never 500 CastError.
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(404).json({ message: 'Car not found' });
+    }
+    const car = await Car.findById(req.params.id)
+      .setOptions({ includeAllListingStatuses: true })
+      .lean();
     if (!car) return res.status(404).json({ message: 'Car not found' });
-    res.json({
-      ...car,
-      id: car._id.toString(),
+
+    const isAdmin = !!req.admin;
+    const isActive = car.status === 'active';
+
+    if (isAdmin) {
+      // Path A/B — admin view. Existing full-doc spread + optional badge.
+      // Pitfall 4: conditional spread so `moderationBadge` key is OMITTED
+      // (not `undefined`) when the listing is active.
+      const badge = !isActive
+        ? {
+            status: car.status,
+            reasonCategory: car.moderationReason,   // enum
+            moderationReason: car.moderationNote,   // free-text note
+            moderatedBy: car.moderatedBy,
+            moderatedAt: car.moderatedAt,
+          }
+        : null;
+      return res.json({
+        ...car,
+        id: car._id.toString(),
+        make: car.makeName || car.make || '',
+        model: car.modelName || car.model || '',
+        listingStatus: car.listingStatus || 'active',
+        ...(badge ? { moderationBadge: badge } : {}),
+      });
+    }
+
+    // Non-admin (Path C/D).
+    if (isActive) {
+      // Path C — preserve the existing pre-Phase-9 response shape byte-for-byte.
+      return res.json({
+        ...car,
+        id: car._id.toString(),
+        make: car.makeName || car.make || '',
+        model: car.modelName || car.model || '',
+        listingStatus: car.listingStatus || 'active',
+      });
+    }
+
+    // Path D — D-05 thin payload. EXACTLY 10 named fields; NEVER spread `car`
+    // (Pitfall 5). HTTP 200 (D-06 — mobile branches on body.status).
+    return res.json({
+      carId: car._id.toString(),
+      status: car.status,
+      reasonCategory: car.moderationReason,
+      title: `${car.year || ''} ${car.makeName || car.make || ''} ${car.modelName || car.model || ''}`.trim(),
       make: car.makeName || car.make || '',
       model: car.modelName || car.model || '',
-      listingStatus: car.listingStatus || 'active',
+      year: car.year,
+      price: car.price,
+      firstPhotoUrl:
+        Array.isArray(car.imageUrls) && car.imageUrls.length > 0
+          ? car.imageUrls[0]
+          : null,
+      banner: LISTING_STATUS_POLICY[car.status]?.banner ?? null,
     });
   } catch (error) {
     console.error('Fetch car error:', error);
-    res.status(500).json({ message: error.message });
+    return res.status(500).json({ message: error.message });
   }
-});
+}
+
+app.get('/api/cars/:id', attachAuthIfPresent, lookupAdminIfPresent, getCarDetailHandler);
 
 // Update listing status (owner only)
 app.patch('/api/cars/:id/status', async (req, res) => {
@@ -1228,4 +1302,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app };
+module.exports = { app, getCarDetailHandler };
