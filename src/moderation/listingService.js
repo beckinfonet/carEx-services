@@ -9,10 +9,12 @@
 // ignores { session }, which would land the audit row OUTSIDE the
 // transaction (Pitfall 2). Same idiom as v1.0 src/moderation/service.js.
 //
-// Wave 1 SCAFFOLDING: Each of the 5 exported handlers throws
-// ListingServiceError('not_implemented'). Wave 2 plans (Suspend / Archive /
-// Delete / Restore) and Wave 3 plan (Edit) replace the bodies with real
-// implementations — they do not re-export or rename these handlers.
+// Phase 8 status (post-Plan 06): all 5 handlers shipped. Wave 1 scaffold
+// throws have been replaced — suspendListing (08-02), archiveListing (08-03),
+// deleteListing (08-04), restoreListing (08-05), editListing (08-06). The
+// handler shape is locked: each accepts { adminUid, adminEmail, carId, ... }
+// and returns { listing, action } per D-02. Wave-2/3 plans cannot re-export
+// or rename these handlers.
 //
 // Handler signatures match D-02's response shape contract:
 //   { ok, listing: {...}, action: {...} }

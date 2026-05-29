@@ -17,12 +17,37 @@
 const express = require('express');
 
 // Phase 8 Plan 02 (LADM-02): wire the Suspend route. Adds 3 module-level
-// requires — service / schemas / self-moderation middleware. NO multer
-// `upload` import here: per D-D-1 multer mounts ONLY on the Edit route
-// (Plan 08-06 lands `upload` alongside the Edit route).
+// requires — service / schemas / self-moderation middleware.
 const service = require('./listingService');
 const schemas = require('./listingSchemas');
 const { denySelfModerationListing } = require('./denySelfModerationListing');
+
+// Phase 8 Plan 06 (LADM-01): shared multer-S3 upload instance from
+// src/uploads/carImages.js. Effective middleware on the Edit route is
+// upload.array('images', 25) — D-D-1 mounts multer ONLY on the Edit route.
+//
+// LAZY-REQUIRED — module-top `require('../uploads/carImages')` triggers
+// multer-S3 construction which throws "bucket is required" when
+// AWS_BUCKET_NAME isn't set (the case in every existing
+// __tests__/listing-moderation/* test that loads listingRouter — e.g. the
+// Phase 7 listingModerationRateLimiter test). The require lives inside
+// getUpload() so the carImages module is loaded only on first PATCH /:carId
+// request (production has AWS creds) while the rest of the router (the 4
+// JSON-only routes + /ping) stays loadable in test environments without
+// AWS credentials.
+let _uploadCache;
+function getUpload() {
+  if (!_uploadCache) {
+    _uploadCache = require('../uploads/carImages').upload;
+  }
+  return _uploadCache;
+}
+// Edit-route multipart middleware: delegates to upload.array('images', 25)
+// from the lazy-loaded carImages module. Express middleware shape (req, res,
+// next) → calling the returned multer middleware closure.
+function uploadImages(req, res, next) {
+  return getUpload().array('images', 25)(req, res, next);
+}
 
 const router = express.Router();
 
@@ -167,6 +192,57 @@ router.patch('/:carId/restore', denySelfModerationListing, async (req, res) => {
     return res.json({ ok: true, listing: result.listing, action: result.action });
   } catch (err) {
     return handleListingServiceError(err, res, 'restore');
+  }
+});
+
+// Phase 8 Plan 06 (LADM-01): PATCH /:carId — admin Edit endpoint.
+//
+// Middleware order is LOAD-BEARING:
+//   1. upload.array('images', 25) FIRST — multer parses the multipart body and
+//      populates req.body + req.files. Anything downstream that reads req.body
+//      (Zod schema, service call) needs multer to have run first. For
+//      JSON-only routes (Suspend/Archive/Delete/Restore) multer would only get
+//      in the way; D-D-1 mounts multer ONLY on this route.
+//   2. denySelfModerationListing SECOND — self-mod check fires AFTER multer.
+//      The middleware reads req.params.carId (which Express populates from
+//      the route pattern before either middleware runs), not req.body, so
+//      the ordering is safe. A self-moderating admin pays the cost of one
+//      multipart parse + S3 upload before getting rejected — same cost the
+//      seller-PUT pays for the self-PUT case.
+//
+// Zod unknown-key handling (D-A-1): editListingSchema is .strict() so unknown
+// top-level keys produce an `unrecognized_keys` issue with `keys: [...]` on
+// the issue itself. Translate to 400 invalid_field with `fields: [...]` so
+// the mobile UI can highlight offending fields (mirrors v1.0 router.js:183-212).
+// Other Zod failures fall through to 400 invalid_payload with the full issues
+// array.
+router.patch(
+  '/:carId',
+  // uploadImages = upload.array('images', 25), lazy-required from
+  // ../uploads/carImages to defer multer-S3 construction until
+  // production runtime (test envs lack AWS_BUCKET_NAME).
+  uploadImages,
+  denySelfModerationListing,
+  async (req, res) => {
+  const parsed = schemas.editListingSchema.safeParse(req.body || {});
+  if (!parsed.success) {
+    const unknownIssue = parsed.error.issues.find((i) => i.code === 'unrecognized_keys');
+    if (unknownIssue) {
+      return res.status(400).json({ error: 'invalid_field', fields: unknownIssue.keys || [] });
+    }
+    return res.status(400).json({ error: 'invalid_payload', issues: parsed.error.issues });
+  }
+  try {
+    const result = await service.editListing({
+      adminUid: req.admin.uid,
+      adminEmail: req.admin.email,
+      carId: req.params.carId,
+      fields: parsed.data,
+      uploadedFiles: req.files || [],
+    });
+    return res.json({ ok: true, listing: result.listing, action: result.action });
+  } catch (err) {
+    return handleListingServiceError(err, res, 'editListing');
   }
 });
 
