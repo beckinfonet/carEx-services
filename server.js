@@ -319,6 +319,28 @@ app.get('/api/cars', async (req, res) => {
   }
 });
 
+// Public total-member count for the home-screen social-proof strip (Option B).
+// No auth — same access posture as GET /api/cars. Returns the total registered
+// users plus a year-over-year growth percentage:
+//   growthPct = (users created in the last 12 months) / (users that existed a
+//   year ago) * 100, rounded to an integer. Falls back to 0 when there is no
+//   prior-year base (avoids divide-by-zero on a young dataset).
+app.get('/api/stats/users', async (req, res) => {
+  try {
+    const oneYearAgo = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
+    const [count, newThisYear] = await Promise.all([
+      User.countDocuments(),
+      User.countDocuments({ createdAt: { $gte: oneYearAgo } }),
+    ]);
+    const base = count - newThisYear;
+    const growthPct = base > 0 ? Math.round((newThisYear / base) * 100) : 0;
+    res.json({ count, growthPct });
+  } catch (error) {
+    console.error('User stats error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
 // Get single car by id — Phase 9 LENF-02 status-aware handler (D-08).
 //
 // Branches on `!!req.admin` (set by lookupAdminIfPresent when the verified
