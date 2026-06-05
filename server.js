@@ -334,14 +334,31 @@ const MEMBER_COUNT_SEED = 700;
 app.get('/api/stats/users', async (req, res) => {
   try {
     const oneYearAgo = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
-    const [actual, newThisYear] = await Promise.all([
+    const hasAvatar = { avatarUrl: { $nin: [null, ''] } };
+    const [actual, newThisYear, brokers, logistics, usersWithAvatar] = await Promise.all([
       User.countDocuments(),
       User.countDocuments({ createdAt: { $gte: oneYearAgo } }),
+      // Broker/LogisticsPartner read-hooks already restrict to APPROVED + active
+      // owners, so these are real, vetted providers with a photo/logo.
+      Broker.find({ status: 'active', ...hasAvatar }).sort({ createdAt: -1 }).limit(5).lean(),
+      LogisticsPartner.find({ status: 'active', ...hasAvatar }).sort({ createdAt: -1 }).limit(5).lean(),
+      User.find(hasAvatar).sort({ createdAt: -1 }).limit(5).lean(),
     ]);
+
     const count = MEMBER_COUNT_SEED + actual;
     const base = count - newThisYear; // seed is part of the prior-year base
     const growthPct = base > 0 ? Math.round((newThisYear / base) * 100) : 0;
-    res.json({ count, growthPct });
+
+    // Up to 5 real avatar image URLs for the home social-proof stack. Providers
+    // (brokers/logistics) first since they reliably upload one, then any user
+    // with a personal avatar. Dedupe by URL.
+    const avatars = [];
+    for (const doc of [...brokers, ...logistics, ...usersWithAvatar]) {
+      if (doc.avatarUrl && !avatars.includes(doc.avatarUrl)) avatars.push(doc.avatarUrl);
+      if (avatars.length >= 5) break;
+    }
+
+    res.json({ count, growthPct, avatars });
   } catch (error) {
     console.error('User stats error:', error);
     res.status(500).json({ message: error.message });
