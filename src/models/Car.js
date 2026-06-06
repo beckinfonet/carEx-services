@@ -23,7 +23,8 @@ const carSchema = new mongoose.Schema({
   currency: String,
   description: String,
   bodyType: String,
-  imageUrls: [String],
+  imageUrls: [String],         // full-resolution / detail-gallery variant (~1600px)
+  thumbnailUrls: [String],     // index-aligned ~400px feed/card variant (new uploads only)
   createdAt: { type: Date, default: Date.now },
   engine: String,
   transmission: String,

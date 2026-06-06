@@ -24,7 +24,7 @@ const { LISTING_STATUS_POLICY } = require('./src/moderation/listingCapabilities'
 const moderationRouter = require('./src/moderation/router');
 const listingModerationRouter = require('./src/moderation/listingRouter');
 const { listingModerationRateLimiter } = require('./src/moderation/listingRateLimit');
-const { upload, s3 } = require('./src/uploads/carImages');
+const { upload, uploadMemory, s3, processAndUploadCarImages } = require('./src/uploads/carImages');
 const { confirmBooking: confirmBookingService, ProviderSuspendedError } = require('./src/payments/confirmBooking');
 // W-7: ListingNotAvailableError MUST be required from its canonical source
 // (./src/payments/refundAndThrow), NOT via a confirmBooking re-export. JS class
@@ -775,7 +775,7 @@ app.post('/api/otp/verify', async (req, res) => {
 });
 
 // Upload and create car (validate makeId/modelId)
-app.post('/api/cars', upload.array('images', 25), attachAuthIfPresent, requireNotSuspended('create_listing'), async (req, res) => {
+app.post('/api/cars', uploadMemory.array('images', 25), attachAuthIfPresent, requireNotSuspended('create_listing'), async (req, res) => {
   try {
     const {
       makeId, modelId, trimLevel, wheelbase, year, price, mileage, fuel, currency, description, bodyType,
@@ -799,7 +799,12 @@ app.post('/api/cars', upload.array('images', 25), attachAuthIfPresent, requireNo
       return res.status(400).json({ error: 'Invalid model for selected make' });
     }
 
-    const imageUrls = req.files ? req.files.map(file => file.location) : [];
+    // Variant pipeline: resize each in-memory upload into full + thumb JPEGs
+    // and persist index-aligned imageUrls / thumbnailUrls. Runs AFTER make/model
+    // validation so an invalid listing never writes objects to S3.
+    const processedImages = await processAndUploadCarImages(req.files, bodyType);
+    const imageUrls = processedImages.map(p => p.full);
+    const thumbnailUrls = processedImages.map(p => p.thumb);
 
     let parsedKnownIssues = [];
     if (knownIssues) {
@@ -846,6 +851,7 @@ app.post('/api/cars', upload.array('images', 25), attachAuthIfPresent, requireNo
       description,
       bodyType,
       imageUrls,
+      thumbnailUrls,
       engine,
       transmission,
       drivetrain,
@@ -877,7 +883,7 @@ app.post('/api/cars', upload.array('images', 25), attachAuthIfPresent, requireNo
 });
 
 // Update car (owner only)
-app.put('/api/cars/:id', upload.array('images', 25), async (req, res) => {
+app.put('/api/cars/:id', uploadMemory.array('images', 25), async (req, res) => {
   try {
     const { sellerId, existingImageUrls } = req.body;
     if (!sellerId) return res.status(400).json({ message: 'sellerId required to edit' });
@@ -892,14 +898,25 @@ app.put('/api/cars/:id', upload.array('images', 25), async (req, res) => {
       exteriorColor, interiorColor, interiorMaterial, seats, doors, phoneNumber, telegramUsername
     } = req.body;
 
-    let imageUrls = car.imageUrls || [];
+    // Reconcile kept + newly-uploaded images while keeping thumbnailUrls
+    // index-aligned to imageUrls. Kept images map back to their stored thumbnail
+    // (falling back to the full URL for pre-variant listings); new uploads are
+    // resized into fresh full+thumb variants.
+    const prevImageUrls = car.imageUrls || [];
+    const prevThumbnailUrls = car.thumbnailUrls || [];
+    let keptImageUrls = prevImageUrls;
     if (existingImageUrls) {
       try {
-        imageUrls = JSON.parse(existingImageUrls);
+        keptImageUrls = JSON.parse(existingImageUrls);
       } catch (e) {}
     }
-    const newUrls = req.files ? req.files.map(f => f.location) : [];
-    imageUrls = [...imageUrls, ...newUrls];
+    const keptThumbnailUrls = keptImageUrls.map((url) => {
+      const idx = prevImageUrls.indexOf(url);
+      return (idx >= 0 && prevThumbnailUrls[idx]) ? prevThumbnailUrls[idx] : url;
+    });
+    const processedImages = await processAndUploadCarImages(req.files, bodyType);
+    const imageUrls = [...keptImageUrls, ...processedImages.map(p => p.full)];
+    const thumbnailUrls = [...keptThumbnailUrls, ...processedImages.map(p => p.thumb)];
 
     if (makeId && modelId) {
       const makeDoc = await VehicleMake.findOne({ _id: makeId, isActive: true });
@@ -932,6 +949,7 @@ app.put('/api/cars/:id', upload.array('images', 25), async (req, res) => {
       description: description ?? car.description,
       bodyType: bodyType ?? car.bodyType,
       imageUrls,
+      thumbnailUrls,
       engine: engine ?? car.engine,
       transmission: transmission ?? car.transmission,
       drivetrain: drivetrain ?? car.drivetrain,
