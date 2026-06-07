@@ -28,7 +28,8 @@ const mongoose = require('mongoose');
 const { z } = require('zod');
 const Notification = require('../models/Notification');
 const Subscription = require('../models/Subscription');
-const { createSubscriptionSchema, cadenceEnum, eventEnum } = require('./schemas');
+const DeviceToken = require('../models/DeviceToken');
+const { createSubscriptionSchema, registerDeviceTokenSchema, cadenceEnum, eventEnum } = require('./schemas');
 
 // Base64 {createdAt,_id} cursor helpers — COPIED VERBATIM from
 // src/moderation/router.js:27-45 (S1). Deterministic tiebreak on _id for the
@@ -288,6 +289,56 @@ router.delete('/subscriptions/:id', async (req, res) => {
     return res.status(200).json({ deleted: result.deletedCount });
   } catch (err) {
     return handleServiceError(err, res, 'delete-subscription');
+  }
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// Device-token register / unregister (Phase 13 NPUSH-04).
+//
+// Same auth model as the subscription routes: mounted under verifyIdToken (NOT
+// admin-gated), and uid is ALWAYS req.auth.uid — NEVER read from body/params
+// (V4 IDOR). The PushService (mobile) consumes these; uid travels in the Bearer.
+// ───────────────────────────────────────────────────────────────────────────
+
+// POST /device-tokens — register (upsert) the caller's device token.
+// `token` is globally unique on the model; an upsert reassigns it to the current
+// uid (a re-login on the same device moves the row, never duplicates it).
+router.post('/device-tokens', async (req, res) => {
+  const parsed = registerDeviceTokenSchema.safeParse(req.body || {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'invalid_payload', issues: parsed.error.issues });
+  }
+  try {
+    const uid = req.auth.uid; // server-side identity ONLY — body uid is ignored.
+    const { token, platform, appVersion } = parsed.data;
+
+    const set = { uid, platform, lastSeenAt: new Date() };
+    if (appVersion !== undefined) set.appVersion = appVersion;
+
+    // Upsert on the unique token. setDefaultsOnInsert seeds createdAt on first write.
+    await DeviceToken.updateOne(
+      { token },
+      { $set: set, $setOnInsert: { token } },
+      { upsert: true, setDefaultsOnInsert: true },
+    );
+
+    return res.status(201).json({ registered: true });
+  } catch (err) {
+    return handleServiceError(err, res, 'register-device-token');
+  }
+});
+
+// DELETE /device-tokens/:token — unregister the caller's own token.
+// Filter ALWAYS includes uid: req.auth.uid so another user's token deletes 0
+// rows (IDOR-safe). Idempotent: a non-existent / non-owned token returns 0.
+router.delete('/device-tokens/:token', async (req, res) => {
+  try {
+    const uid = req.auth.uid;
+    const token = req.params.token;
+    const result = await DeviceToken.deleteOne({ uid, token });
+    return res.status(200).json({ deleted: result.deletedCount ?? 0 });
+  } catch (err) {
+    return handleServiceError(err, res, 'unregister-device-token');
   }
 });
 

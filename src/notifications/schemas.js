@@ -52,14 +52,28 @@ const watchSchema = z.object({
 // Create dispatch — split on kind.
 const createSubscriptionSchema = z.discriminatedUnion('kind', [savedSearchSchema, watchSchema]);
 
+// --- device-token register payload (Phase 13 NPUSH-04) ---
+// platform enum kept in LOCKSTEP with src/models/DeviceToken.js. .strict() so an
+// injected `uid` (or any unknown key) is rejected — uid ALWAYS comes from the
+// verified Bearer, never the body (V4 IDOR). appVersion is optional metadata.
+const platformEnum = z.enum(['ios', 'android']);
+
+const registerDeviceTokenSchema = z.object({
+  token: z.string().min(1),
+  platform: platformEnum,
+  appVersion: z.string().min(1).optional(),
+}).strict();
+
 module.exports = {
   // enums (exported for handler reuse / lockstep assertions)
   kindEnum,
   cadenceEnum,
   eventEnum,
+  platformEnum,
   // schemas
   criteriaSchema,
   savedSearchSchema,
   watchSchema,
   createSubscriptionSchema,
+  registerDeviceTokenSchema,
 };
