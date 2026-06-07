@@ -1,33 +1,88 @@
-// Phase 12 — Wave 0 scaffold (NDOM-03 emit guards: hide-hook suppression).
+// Phase 12 — Wave 1 (NDOM-03 emit guards: hide-hook suppression).
 //
-// Mirrors the Phase 5 Wave-0 pattern: the wiring `require` of the not-yet-built
-// target module is the load-bearing part. Because notificationService.js does not
-// exist yet, a top-level require would crash jest COLLECTION (not just fail a test).
-// To keep this file collectible and reporting test.todo (the intended Wave-0 RED
-// state), the require is guarded — it records whether the module resolved so Wave-1
-// can flip these todos to real assertions once notificationService.js lands.
-//
-// VALIDATION map: NDOM-03 — suppress emit for a hidden/suspended/archived listing
-// (plain Car.findById returns null → notificationService.emit produces 0 rows).
+// VALIDATION map: NDOM-03 — suppress emit for a hidden/suspended/archived listing.
+// A PLAIN Car.findById returns null (seller hidden by the pre(/^find/) hook) OR a
+// non-active doc → notificationService.emit produces 0 rows (TOCTOU re-check at send
+// time; T-12-03-01). emit must NEVER use the includeAllUsers / includeAllListingStatuses
+// bypass flags (asserted by source grep + behavior).
 
-let notificationService = null;
-let moduleLoadError = null;
-try {
-  // eslint-disable-next-line global-require
-  notificationService = require('../notificationService');
-} catch (err) {
-  moduleLoadError = err; // expected in Wave 0 (module not built yet)
+const fs = require('fs');
+const path = require('path');
+const { emit } = require('../notificationService');
+
+// In-memory Notification stub (create returns array form, matching mongoose option API).
+function makeNotificationStub() {
+  const rows = [];
+  return {
+    rows,
+    async findOne() { return null; },
+    async create(docs) {
+      const created = docs.map((d) => ({ ...d, _id: rows.length + 1 }));
+      rows.push(...created);
+      return created;
+    },
+  };
 }
 
-describe('NDOM-03 emit guards — hide-hook suppression (Wave 0 scaffold)', () => {
-  test('notificationService wiring import is recorded for Wave 1', () => {
-    // Documents the intended import target. In Wave 0 the module may not yet exist;
-    // Wave 1 builds it and removes this scaffold guard.
-    expect(moduleLoadError === null || moduleLoadError.code === 'MODULE_NOT_FOUND').toBe(true);
-    void notificationService;
+// A Subscription stub that WOULD return a matching watcher (to prove suppression is
+// the hide-hook, not an empty target set).
+function makeWatchSubStub() {
+  return {
+    async find() {
+      return [{ _id: 'sub1', uid: 'watcher-1', kind: 'watch', carId: 'car-1', active: true, events: ['price_drop'] }];
+    },
+  };
+}
+
+describe('NDOM-03 emit guards — hide-hook suppression', () => {
+  test('plain Car.findById null (hidden seller) → emit produces 0 notifications', async () => {
+    const Notification = makeNotificationStub();
+    const Car = { async findById() { return null; } }; // hide-hook hid the car
+
+    const result = await emit(
+      { type: 'price_drop', carId: 'car-1', actorUid: 'seller-1', oldPrice: 20000, newPrice: 15000 },
+      { Car, Notification, Subscription: makeWatchSubStub() }
+    );
+
+    expect(result).toEqual([]);
+    expect(Notification.rows).toHaveLength(0);
   });
 
-  test.todo('plain Car.findById null (hidden seller) → emit produces 0 notifications');
-  test.todo('listing status !== active (suspended/archived) → emit suppressed');
-  test.todo('emit pipeline NEVER passes includeAllUsers / includeAllListingStatuses bypass flags');
+  test('listing status !== active (suspended/archived) → emit suppressed', async () => {
+    const Notification = makeNotificationStub();
+    for (const status of ['suspended', 'archived', 'deleted', 'booked']) {
+      const Car = { async findById() { return { _id: 'car-1', status, price: 15000 }; } };
+      const result = await emit(
+        { type: 'booked', carId: 'car-1', actorUid: 'seller-1' },
+        { Car, Notification, Subscription: makeWatchSubStub() }
+      );
+      expect(result).toEqual([]);
+    }
+    expect(Notification.rows).toHaveLength(0);
+  });
+
+  test('active listing with a matching watcher → emit DOES write (suppression is the guard, not a dead path)', async () => {
+    const Notification = makeNotificationStub();
+    const Car = { async findById() { return { _id: 'car-1', status: 'active', price: 15000, makeName: 'Toyota', modelName: 'Camry' }; } };
+    const Subscription = {
+      async find() {
+        return [{ _id: 'sub1', uid: 'watcher-1', kind: 'watch', carId: 'car-1', active: true, events: ['price_drop'] }];
+      },
+    };
+    const result = await emit(
+      { type: 'price_drop', carId: 'car-1', actorUid: 'seller-1', oldPrice: 20000, newPrice: 15000 },
+      { Car, Notification, Subscription }
+    );
+    expect(result).toHaveLength(1);
+  });
+
+  test('emit pipeline source NEVER passes includeAllUsers / includeAllListingStatuses bypass flags', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'notificationService.js'), 'utf8');
+    // Strip the documentation block comment that explains WHY the flags are forbidden,
+    // then assert the code never invokes setOptions with the bypass flags.
+    expect(src.includes('.setOptions(')).toBe(false);
+    // The only mentions of the flag names are in the cautionary header comment; ensure
+    // they never appear as a chained call argument (no `{ includeAllUsers` object literal).
+    expect(/\{\s*includeAll(Users|ListingStatuses)/.test(src)).toBe(false);
+  });
 });

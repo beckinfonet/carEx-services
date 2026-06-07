@@ -1,27 +1,69 @@
-// Phase 12 — Wave 0 scaffold (NSUB-04 price-drop direction check).
-//
-// Wiring require of the not-yet-built notificationService (guarded; see
-// guards.test.js header for the pattern rationale).
+// Phase 12 — Wave 1 (NSUB-04 price-drop direction check).
 //
 // VALIDATION map: NSUB-04 — price_drop is emitted ONLY when newPrice < oldPrice.
 // A price increase or unchanged price emits nothing.
 
-let notificationService = null;
-let moduleLoadError = null;
-try {
-  // eslint-disable-next-line global-require
-  notificationService = require('../notificationService');
-} catch (err) {
-  moduleLoadError = err;
+const { emit } = require('../notificationService');
+
+function makeNotificationStub() {
+  const rows = [];
+  return {
+    rows,
+    async findOne() { return null; },
+    async create(docs) {
+      const created = docs.map((d) => ({ ...d, read: false, _id: rows.length + 1 }));
+      rows.push(...created);
+      return created;
+    },
+  };
 }
 
-describe('NSUB-04 price-drop direction (Wave 0 scaffold)', () => {
-  test('notificationService wiring import is recorded for Wave 1', () => {
-    expect(moduleLoadError === null || moduleLoadError.code === 'MODULE_NOT_FOUND').toBe(true);
-    void notificationService;
+const activeCar = { _id: 'car-1', status: 'active', price: 15000, makeName: 'Toyota', modelName: 'Camry' };
+const Car = { async findById() { return activeCar; } };
+const Subscription = {
+  async find() {
+    return [{ _id: 'sub-w', uid: 'watcher-1', kind: 'watch', carId: 'car-1', active: true, events: ['price_drop'] }];
+  },
+};
+
+describe('NSUB-04 price-drop direction', () => {
+  test('newPrice < oldPrice → price_drop emitted to watchers', async () => {
+    const Notification = makeNotificationStub();
+    const written = await emit(
+      { type: 'price_drop', carId: 'car-1', actorUid: 'seller-1', oldPrice: 20000, newPrice: 15000 },
+      { Car, Notification, Subscription }
+    );
+    expect(written).toHaveLength(1);
+    expect(written[0].uid).toBe('watcher-1');
   });
 
-  test.todo('newPrice < oldPrice → price_drop emitted to watchers');
-  test.todo('newPrice > oldPrice → no notification');
-  test.todo('newPrice === oldPrice → no notification');
+  test('newPrice > oldPrice → no notification', async () => {
+    const Notification = makeNotificationStub();
+    const written = await emit(
+      { type: 'price_drop', carId: 'car-1', actorUid: 'seller-1', oldPrice: 15000, newPrice: 20000 },
+      { Car, Notification, Subscription }
+    );
+    expect(written).toEqual([]);
+    expect(Notification.rows).toHaveLength(0);
+  });
+
+  test('newPrice === oldPrice → no notification', async () => {
+    const Notification = makeNotificationStub();
+    const written = await emit(
+      { type: 'price_drop', carId: 'car-1', actorUid: 'seller-1', oldPrice: 15000, newPrice: 15000 },
+      { Car, Notification, Subscription }
+    );
+    expect(written).toEqual([]);
+    expect(Notification.rows).toHaveLength(0);
+  });
+
+  test('price_drop emit body params carry oldPrice/newPrice for KGS-som rendering', async () => {
+    const Notification = makeNotificationStub();
+    await emit(
+      { type: 'price_drop', carId: 'car-1', actorUid: 'seller-1', oldPrice: 20000, newPrice: 15000 },
+      { Car, Notification, Subscription }
+    );
+    expect(Notification.rows[0].params.oldPrice).toBe(20000);
+    expect(Notification.rows[0].params.newPrice).toBe(15000);
+  });
 });
