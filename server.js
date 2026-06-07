@@ -24,6 +24,8 @@ const { LISTING_STATUS_POLICY } = require('./src/moderation/listingCapabilities'
 const moderationRouter = require('./src/moderation/router');
 const listingModerationRouter = require('./src/moderation/listingRouter');
 const { listingModerationRateLimiter } = require('./src/moderation/listingRateLimit');
+const notificationRouter = require('./src/notifications/router');
+const notificationService = require('./src/notifications/notificationService');
 const { upload, uploadMemory, s3, processAndUploadCarImages } = require('./src/uploads/carImages');
 const { confirmBooking: confirmBookingService, ProviderSuspendedError } = require('./src/payments/confirmBooking');
 // W-7: ListingNotAvailableError MUST be required from its canonical source
@@ -468,8 +470,34 @@ app.patch('/api/cars/:id/status', async (req, res) => {
     if (!car) return res.status(404).json({ message: 'Car not found' });
     if (car.sellerId !== sellerId) return res.status(403).json({ message: 'Not authorized' });
 
+    // NSUB-02 capture-before-mutation: snapshot the lifecycle status before the
+    // reassignment so back_available can be gated on a booked→active transition.
+    const oldStatus = car.listingStatus;
+
     car.listingStatus = listingStatus;
     await car.save();
+
+    // NDOM-02: emit the watch-family lifecycle event AFTER commit, off-hot-path.
+    //   booked          → new status is booked
+    //   sold            → new status is sold
+    //   back_available  → ONLY on a booked→active transition (NSUB-02)
+    // Actor = seller (ownership-enforced above), excluded from self-notify.
+    // Wrapped so a notification failure can NEVER break the status response.
+    let notifyType = null;
+    if (listingStatus === 'booked') notifyType = 'booked';
+    else if (listingStatus === 'sold') notifyType = 'sold';
+    else if (listingStatus === 'active' && oldStatus === 'booked') notifyType = 'back_available';
+    if (notifyType) {
+      try {
+        await notificationService.emit({
+          type: notifyType,
+          carId: car._id.toString(),
+          actorUid: sellerId,
+        });
+      } catch (notifyErr) {
+        console.error(`[notify] ${notifyType} emit failed:`, notifyErr);
+      }
+    }
 
     res.json({
       ...car.toObject(),
@@ -511,13 +539,16 @@ app.get('/api/users/:uid', async (req, res) => {
 
 app.put('/api/users/:uid', async (req, res) => {
   try {
-    const { firstName, lastName, phoneNumber, telegramUsername, avatarUrl } = req.body;
+    const { firstName, lastName, phoneNumber, telegramUsername, avatarUrl, language } = req.body;
     const update = {};
     if (firstName !== undefined) update.firstName = firstName;
     if (lastName !== undefined) update.lastName = lastName;
     if (phoneNumber !== undefined) update.phoneNumber = phoneNumber;
     if (telegramUsername !== undefined) update.telegramUsername = telegramUsername;
     if (avatarUrl !== undefined) update.avatarUrl = avatarUrl;
+    // NI18N-01: language is enum-guarded — only the RU/EN values are persisted;
+    // any out-of-enum value is ignored (T-12-05-04 tampering mitigation).
+    if (language !== undefined && ['RU', 'EN'].includes(language)) update.language = language;
     const user = await User.findOneAndUpdate(
       { firebaseUid: req.params.uid },
       update,
@@ -871,6 +902,22 @@ app.post('/api/cars', uploadMemory.array('images', 25), attachAuthIfPresent, req
 
     await newCar.save();
     const saved = newCar.toObject();
+
+    // NDOM-02: emit new_listing AFTER commit (off-hot-path). emit() re-reads the
+    // Car with the plain hide-hook (TOCTOU suppression) and fans out to matching
+    // saved-search subscriptions. Wrapped so a notification failure can NEVER
+    // break the listing-creation response (Pitfall 8 / T-12-05-03). Actor is the
+    // seller (or the Bearer uid when present) so they are excluded from self-notify.
+    try {
+      await notificationService.emit({
+        type: 'new_listing',
+        carId: newCar._id.toString(),
+        actorUid: sellerId || req.auth?.uid,
+      });
+    } catch (notifyErr) {
+      console.error('[notify] new_listing emit failed:', notifyErr);
+    }
+
     res.status(201).json({
       ...saved,
       make: saved.makeName,
@@ -891,6 +938,11 @@ app.put('/api/cars/:id', uploadMemory.array('images', 25), async (req, res) => {
     const car = await Car.findById(req.params.id);
     if (!car) return res.status(404).json({ message: 'Car not found' });
     if (car.sellerId !== sellerId) return res.status(403).json({ message: 'Not authorized to edit this listing' });
+
+    // NSUB-02 capture-before-mutation: snapshot the price BEFORE the Object.assign
+    // below reassigns car.price. emit() (after save) direction-checks oldPrice vs
+    // newPrice and only fires on a decrease, so we must capture the pre-edit value here.
+    const oldPrice = car.price;
 
     const {
       makeId, modelId, trimLevel, wheelbase, year, price, mileage, fuel, currency, description, bodyType,
@@ -967,6 +1019,26 @@ app.put('/api/cars/:id', uploadMemory.array('images', 25), async (req, res) => {
 
     await car.save();
     const saved = car.toObject();
+
+    // NDOM-02 / NSUB-02: emit price_drop AFTER commit. Only fire when the price
+    // actually changed (skip non-price edits); emit() itself short-circuits a
+    // non-decrease, so a raise produces zero notifications. Actor = seller
+    // (ownership-enforced above), excluded from self-notify. Off-hot-path try/catch
+    // so a notification failure can NEVER break the edit response (T-12-05-03).
+    if (typeof oldPrice === 'number' && typeof car.price === 'number' && car.price !== oldPrice) {
+      try {
+        await notificationService.emit({
+          type: 'price_drop',
+          carId: car._id.toString(),
+          actorUid: sellerId,
+          oldPrice,
+          newPrice: car.price,
+        });
+      } catch (notifyErr) {
+        console.error('[notify] price_drop emit failed:', notifyErr);
+      }
+    }
+
     res.json({
       ...saved,
       id: saved._id.toString(),
@@ -987,6 +1059,12 @@ app.put('/api/cars/:id', uploadMemory.array('images', 25), async (req, res) => {
 // follow-up milestone migrates them (D-06).
 app.use('/api/admin/moderation', verifyIdToken, requireAdmin, moderationRouter);
 app.use('/api/admin/moderation/listings', verifyIdToken, requireAdmin, listingModerationRateLimiter, listingModerationRouter);
+
+// Notification center (NDOM-05). INVERTS the moderation mount above: verifyIdToken
+// ONLY, NO requireAdmin — every authenticated buyer reaches their own per-user
+// notification feed + subscriptions (the router scopes every query to
+// req.auth.uid for IDOR safety). Deliberately not admin-gated.
+app.use('/api/notifications', verifyIdToken, notificationRouter);
 
 // Check if current user is an admin
 app.get('/api/admin/status/:uid', async (req, res) => {
@@ -1227,6 +1305,23 @@ app.post('/api/payments/confirm-booking', attachAuthIfPresent, requireNotSuspend
       buyerUid,
       items,
     });
+
+    // NDOM-02: emit `booked` AFTER the confirm-booking transaction commits — never
+    // inside the service's session.withTransaction (Anti-pattern: post-save hooks
+    // would fire inside the txn, lack actor context, and roll back with it). The
+    // buyer is the actor (watchers other than the buyer get notified). Off-hot-path
+    // try/catch so a notification failure can NEVER break the booking response.
+    try {
+      const bookedCarId = result?.car?._id ? result.car._id.toString() : carId;
+      await notificationService.emit({
+        type: 'booked',
+        carId: bookedCarId,
+        actorUid: buyerUid,
+      });
+    } catch (notifyErr) {
+      console.error('[notify] booked emit failed:', notifyErr);
+    }
+
     return res.json(result);
   } catch (err) {
     // Phase 9 LENF-03 — ListingNotAvailableError branch (Pitfall 10: must
