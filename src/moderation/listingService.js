@@ -28,6 +28,7 @@ const mongoose = require('mongoose');
 const Car = require('../models/Car');
 const ListingModerationAction = require('../models/ListingModerationAction');
 const { ListingServiceError } = require('./listingErrors');
+const notificationService = require('../notifications/notificationService');
 
 // ─────────────────────────────────────────────────────────────────────────
 // Plan 10-03 (LUI-04) — search helpers for searchListings() below.
@@ -378,6 +379,27 @@ async function editListing({ adminUid, adminEmail, carId, fields, uploadedFiles 
     });
   } finally {
     await session.endSession();
+  }
+
+  // NDOM-02 / NSUB-02: admin price_drop. Emit AFTER the edit transaction commits
+  // (post-commit, NEVER inside the session — a notification must not roll back with
+  // the edit nor fire on an aborted txn). Uses fieldDiff.price.{before,after};
+  // emit() direction-checks, so only a DECREASE produces a notification. Actor is
+  // the admin (excluded from self-notify). Off-hot-path try/catch so a notification
+  // failure can NEVER break the edit response (T-12-05-03).
+  if (fieldDiff.price) {
+    try {
+      await notificationService.emit({
+        type: 'price_drop',
+        carId: String(carId),
+        actorUid: adminUid,
+        oldPrice: fieldDiff.price.before,
+        newPrice: fieldDiff.price.after,
+      });
+    } catch (notifyErr) {
+      // eslint-disable-next-line no-console
+      console.error('[notify] admin price_drop emit failed:', notifyErr);
+    }
   }
 
   // D-02 thin projection — Edit-specific fields (lastEditedBy + lastEditedAt)

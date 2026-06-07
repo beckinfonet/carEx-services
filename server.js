@@ -1305,6 +1305,23 @@ app.post('/api/payments/confirm-booking', attachAuthIfPresent, requireNotSuspend
       buyerUid,
       items,
     });
+
+    // NDOM-02: emit `booked` AFTER the confirm-booking transaction commits — never
+    // inside the service's session.withTransaction (Anti-pattern: post-save hooks
+    // would fire inside the txn, lack actor context, and roll back with it). The
+    // buyer is the actor (watchers other than the buyer get notified). Off-hot-path
+    // try/catch so a notification failure can NEVER break the booking response.
+    try {
+      const bookedCarId = result?.car?._id ? result.car._id.toString() : carId;
+      await notificationService.emit({
+        type: 'booked',
+        carId: bookedCarId,
+        actorUid: buyerUid,
+      });
+    } catch (notifyErr) {
+      console.error('[notify] booked emit failed:', notifyErr);
+    }
+
     return res.json(result);
   } catch (err) {
     // Phase 9 LENF-03 — ListingNotAvailableError branch (Pitfall 10: must
