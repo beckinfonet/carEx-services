@@ -33,6 +33,7 @@ jest.mock('../../models/DeviceToken', () => ({
   deleteOne: (...args) => mockDeleteOne(...args),
 }));
 
+const mongoose = require('mongoose');
 const { startReplSet, stopReplSet } = require('../../../__tests__/_helpers/mongoReplSet');
 const { pluralizeRu, renderDigest } = require('../translations');
 const { ensureInitialized } = require('../../security/firebaseAdmin');
@@ -212,19 +213,192 @@ describe('Phase 14 daily digest', () => {
     });
   });
 
-  // ── Crash safety (NDIG-02) ───────────────────────────────────────────────────
-  // SC3 — crash mid-run → no double-send, no drop (per-id clear of only sent rows).
-  test.todo('NDIG-02 crash no-double-send: user-B send throws after A clears → A cleared, B still pending; re-run sends B, not A');
-  // SC3 — snapshot bound createdAt <= runStart excludes mid-run new rows.
-  test.todo('NDIG-02 snapshot bound: a row with createdAt > runStart is not in the batch');
+  // ── runDigest crash-safe flush (NDIG-02 / NDIG-03 / SC4) — REAL integration ──
+  // These rows use the in-memory replica set + real Notification/Car/User models and
+  // an injected mock fcm.sendDigest. runDigest is invoked DIRECTLY (no cron) per SC1.
+  describe('runDigest flush (NDIG-02 / NDIG-03 / SC4)', () => {
+    const { runDigest, DIGEST_HOUR } = require('../digest');
+    const Notification = require('../../models/Notification');
+    const User = require('../../models/User');
+    const Car = require('../../models/Car');
+
+    // Seed an active car so the hide-hook re-check passes by default.
+    async function makeCar(overrides = {}) {
+      const car = await Car.create({
+        make: 'Toyota',
+        model: 'Camry',
+        year: 2020,
+        price: 10000,
+        sellerId: new mongoose.Types.ObjectId().toString(),
+        status: 'active',
+        ...overrides,
+      });
+      return car;
+    }
+
+    async function makeUser(uid, lang = 'RU') {
+      return User.create({
+        firebaseUid: uid,
+        email: `${uid}@example.com`,
+        language: lang,
+      });
+    }
+
+    function pendingRow(uid, extra = {}) {
+      return {
+        uid,
+        kind: 'saved_search',
+        titleKey: 'new_match',
+        bodyKey: 'new_match',
+        params: {},
+        data: { deeplink: 'carex://notifications', carId: null, searchId: null },
+        digestPending: true,
+        ...extra,
+      };
+    }
+
+    beforeEach(async () => {
+      await Promise.all([
+        Notification.deleteMany({}),
+        User.deleteMany({}),
+        Car.deleteMany({}),
+      ]);
+    });
+
+    test('DIGEST_HOUR is 8 and runDigest is directly callable (no cron)', () => {
+      expect(DIGEST_HOUR).toBe(8);
+      expect(typeof runDigest).toBe('function');
+    });
+
+    test('NDIG-03 one-push-count: 5 digestPending rows for one uid → ONE sendDigest with count=5, all cleared', async () => {
+      await makeUser('u1', 'RU');
+      await Notification.insertMany(Array.from({ length: 5 }, () => pendingRow('u1')));
+
+      const sendDigest = jest.fn().mockResolvedValue({ ok: true, delivered: 1 });
+      await runDigest({ now: new Date(), deps: { fcm: { sendDigest } } });
+
+      expect(sendDigest).toHaveBeenCalledTimes(1);
+      const arg = sendDigest.mock.calls[0][0];
+      expect(arg.uid).toBe('u1');
+      expect(arg.count).toBe(5);
+      expect(arg.lang).toBe('RU');
+      expect(arg.data).toEqual({ deeplink: 'carex://notifications' });
+
+      const remaining = await Notification.countDocuments({ uid: 'u1', digestPending: true });
+      expect(remaining).toBe(0);
+      const stamped = await Notification.countDocuments({ uid: 'u1', digestRunId: { $ne: null } });
+      expect(stamped).toBe(0); // digestRunId $unset on successful clear
+    });
+
+    test('NDIG-02 snapshot bound: a row created AFTER runStart is not claimed/sent/cleared', async () => {
+      await makeUser('u1', 'RU');
+      const runStart = new Date('2026-06-07T08:00:00.000Z');
+      // One row before runStart (in batch), one after (tomorrow's row).
+      await Notification.create(pendingRow('u1', { createdAt: new Date(runStart.getTime() - 60_000) }));
+      const future = await Notification.create(
+        pendingRow('u1', { createdAt: new Date(runStart.getTime() + 60_000) }),
+      );
+
+      const sendDigest = jest.fn().mockResolvedValue({ ok: true, delivered: 1 });
+      await runDigest({ now: runStart, deps: { fcm: { sendDigest } } });
+
+      expect(sendDigest).toHaveBeenCalledTimes(1);
+      expect(sendDigest.mock.calls[0][0].count).toBe(1); // only the pre-runStart row
+
+      const futureRow = await Notification.findById(future._id).lean();
+      expect(futureRow.digestPending).toBe(true); // untouched
+      expect(futureRow.digestRunId).toBeNull(); // never claimed
+    });
+
+    test('NDIG-02 crash no-double-send/no-drop: B-send throws after A cleared → A cleared, B retained; re-run sends B not A', async () => {
+      await makeUser('a', 'RU');
+      await makeUser('b', 'RU');
+      await Notification.insertMany([pendingRow('a'), pendingRow('a'), pendingRow('b')]);
+
+      // First run: A succeeds, B throws (simulated crash on B's send).
+      const failingSend = jest.fn(async ({ uid }) => {
+        if (uid === 'b') throw new Error('simulated crash on B');
+        return { ok: true, delivered: 1 };
+      });
+      await runDigest({ now: new Date(), deps: { fcm: { sendDigest: failingSend } } });
+
+      // A cleared; B still pending (no drop). One user's failure did not abort the loop.
+      expect(await Notification.countDocuments({ uid: 'a', digestPending: true })).toBe(0);
+      expect(await Notification.countDocuments({ uid: 'b', digestPending: true })).toBe(1);
+
+      // Re-run: only B is re-picked; A is NOT re-sent (no double-send for cleared user).
+      const secondSend = jest.fn().mockResolvedValue({ ok: true, delivered: 1 });
+      await runDigest({ now: new Date(), deps: { fcm: { sendDigest: secondSend } } });
+
+      expect(secondSend).toHaveBeenCalledTimes(1);
+      expect(secondSend.mock.calls[0][0].uid).toBe('b');
+      expect(await Notification.countDocuments({ digestPending: true })).toBe(0);
+    });
+
+    test('NDIG-02 re-claimable: a leftover row claimed by a crashed prior run is re-stamped and sent', async () => {
+      await makeUser('c', 'RU');
+      // Simulate a crashed prior run: row is digestPending AND already carries a stale digestRunId.
+      await Notification.create(pendingRow('c', { digestRunId: 'stale-prior-run-id' }));
+
+      const sendDigest = jest.fn().mockResolvedValue({ ok: true, delivered: 1 });
+      await runDigest({ now: new Date(), deps: { fcm: { sendDigest } } });
+
+      expect(sendDigest).toHaveBeenCalledTimes(1);
+      expect(sendDigest.mock.calls[0][0].count).toBe(1);
+      expect(await Notification.countDocuments({ uid: 'c', digestPending: true })).toBe(0);
+    });
+
+    test('SC4 hide-hook re-check: a watch-family row whose Car is now non-active is excluded from the count and not sent', async () => {
+      await makeUser('u1', 'RU');
+      const activeCar = await makeCar({ status: 'active' });
+      const hiddenCar = await makeCar({ status: 'suspended' });
+      const deletedCarId = new mongoose.Types.ObjectId().toString(); // no Car doc → null
+
+      await Notification.insertMany([
+        pendingRow('u1', { kind: 'watch', data: { deeplink: 'carex://notifications', carId: activeCar._id.toString(), searchId: null } }),
+        pendingRow('u1', { kind: 'watch', data: { deeplink: 'carex://notifications', carId: hiddenCar._id.toString(), searchId: null } }),
+        pendingRow('u1', { kind: 'watch', data: { deeplink: 'carex://notifications', carId: deletedCarId, searchId: null } }),
+      ]);
+
+      const sendDigest = jest.fn().mockResolvedValue({ ok: true, delivered: 1 });
+      await runDigest({ now: new Date(), deps: { fcm: { sendDigest } } });
+
+      // Only the active-car row survives the hide-hook re-check.
+      expect(sendDigest).toHaveBeenCalledTimes(1);
+      expect(sendDigest.mock.calls[0][0].count).toBe(1);
+
+      // Sent (surviving) row cleared; dropped rows stay digestPending:true (not sent, not lost).
+      const pending = await Notification.countDocuments({ uid: 'u1', digestPending: true });
+      expect(pending).toBe(2); // the suspended + the null-car rows
+    });
+
+    test('language resolution: a row for an EN user passes lang=EN to sendDigest', async () => {
+      await makeUser('en-user', 'EN');
+      await Notification.create(pendingRow('en-user'));
+
+      const sendDigest = jest.fn().mockResolvedValue({ ok: true, delivered: 1 });
+      await runDigest({ now: new Date(), deps: { fcm: { sendDigest } } });
+
+      expect(sendDigest).toHaveBeenCalledTimes(1);
+      expect(sendDigest.mock.calls[0][0].lang).toBe('EN');
+    });
+
+    test('!ok send leaves the rows digestPending (no clear, no drop)', async () => {
+      await makeUser('u1', 'RU');
+      await Notification.insertMany([pendingRow('u1'), pendingRow('u1')]);
+
+      const sendDigest = jest.fn().mockResolvedValue({ ok: false, delivered: 0 });
+      await runDigest({ now: new Date(), deps: { fcm: { sendDigest } } });
+
+      expect(sendDigest).toHaveBeenCalledTimes(1);
+      // Not cleared — next morning re-picks (no drop).
+      expect(await Notification.countDocuments({ uid: 'u1', digestPending: true })).toBe(2);
+    });
+  });
 
   // ── Retention / prune (NDIG-05 / NDOM-06) ────────────────────────────────────
   // SC4 — 90-day notifications pruned (91d deleted, 89d kept).
   test.todo('NDIG-05/NDOM-06 90-day prune: 91d-old notification deleted, 89d-old kept');
   // SC4 — stale device tokens pruned, non-duplicative with the send-time prune.
   test.todo('NDIG-05 stale-token prune: stale lastSeenAt token deleted, fresh token kept');
-
-  // ── Hide-hook re-check (SC4 / NDIG-03) ───────────────────────────────────────
-  // SC4 — listing hidden overnight is excluded from the count and not sent.
-  test.todo('SC4 hide-hook re-check: digestPending row whose Car is now non-active is excluded and not sent');
 });
