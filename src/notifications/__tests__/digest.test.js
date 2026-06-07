@@ -16,6 +16,7 @@
 // test MUST NOT start the cron — the scaffold asserts this once the module exists.
 
 const { startReplSet, stopReplSet } = require('../../../__tests__/_helpers/mongoReplSet');
+const { pluralizeRu, renderDigest } = require('../translations');
 
 let replset;
 
@@ -39,8 +40,75 @@ describe('Phase 14 daily digest', () => {
   // SC2 — 3 daily matches + 2 cap-overflow → exactly ONE push with count=5.
   test.todo('NDIG-03 one-push-count: 5 digestPending rows for one uid → sendDigest called once with count:5');
 
-  // ── Localization boundary (D-04) — made a REAL assertion in Task 2 below. ─────
-  // (See the "D-04 pluralizeRu boundaries" describe block.)
+  // ── Localization boundary (D-04) — REAL assertions (Task 2). ─────────────────
+  describe('D-04 pluralizeRu boundaries', () => {
+    // Standard Russian 3-form rule:
+    //   mod10===1 && mod100!==11 → one
+    //   mod10 in 2..4 && (mod100<12 || mod100>14) → few
+    //   else → many  (covers 0, 5..20, the 11..14 teen exception, etc.)
+    const FORMS = ['one', 'few', 'many'];
+
+    test.each([
+      [0, 'many'],
+      [1, 'one'],
+      [2, 'few'],
+      [3, 'few'],
+      [4, 'few'],
+      [5, 'many'],
+      [6, 'many'],
+      [11, 'many'],
+      [12, 'many'],
+      [13, 'many'],
+      [14, 'many'],
+      [20, 'many'],
+      [21, 'one'],
+      [22, 'few'],
+      [23, 'few'],
+      [24, 'few'],
+      [25, 'many'],
+      [101, 'one'],
+      [111, 'many'],
+      [114, 'many'],
+      [121, 'one'],
+    ])('pluralizeRu(%i) → %s form', (n, expected) => {
+      expect(pluralizeRu(n, FORMS)).toBe(expected);
+    });
+
+    // Rendered RU digest_title must read grammatically per count.
+    test.each([
+      [1, 'машина'],
+      [3, 'машины'],
+      [4, 'машины'],
+      [5, 'машин'],
+      [11, 'машин'],
+      [14, 'машин'],
+      [21, 'машина'],
+      [22, 'машины'],
+      [0, 'машин'],
+    ])('RU digest_title for count %i contains the noun form "%s"', (count, nounForm) => {
+      const title = renderDigest('RU', count).title;
+      expect(title).toContain(String(count));
+      expect(title).toContain(nounForm);
+    });
+
+    // EN uses simple singular/plural.
+    test('EN digest_title is singular for 1 and plural for >1', () => {
+      const one = renderDigest('EN', 1).title;
+      const many = renderDigest('EN', 2).title;
+      expect(one).toContain('1');
+      expect(one).toMatch(/match\b/);
+      expect(one).not.toMatch(/matches/);
+      expect(many).toContain('2');
+      expect(many).toMatch(/matches/);
+    });
+
+    // T-14-01-01: only the integer count is interpolated — no other param leaks.
+    test('renderDigest interpolates only the count (no PII params)', () => {
+      const { title } = renderDigest('RU', 5);
+      expect(title).toContain('5');
+      expect(title).not.toMatch(/\{[a-zA-Z]+\}/); // no leftover unfilled tokens
+    });
+  });
 
   // ── Crash safety (NDIG-02) ───────────────────────────────────────────────────
   // SC3 — crash mid-run → no double-send, no drop (per-id clear of only sent rows).
