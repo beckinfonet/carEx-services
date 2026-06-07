@@ -60,6 +60,27 @@ const TRANSLATIONS = {
     push_booked: { title: 'Авто забронировали', body: 'Откройте, чтобы посмотреть.' },
     push_sold: { title: 'Авто продали', body: 'Откройте, чтобы посмотреть.' },
     push_back_available: { title: 'Авто снова в продаже', body: 'Откройте, чтобы посмотреть.' },
+
+    // ── Daily DIGEST set (Phase 14 NDIG-03 / D-04) ───────────────────────────
+    // ONE localized morning push bundling a buyer's pending daily-cadence matches.
+    // The ONLY dynamic value is the integer {count} (T-14-01-01 — no make/model/
+    // price/seller/uid ever enters this copy). The RU title needs grammatically-
+    // correct 3-form agreement (1 машина / 2-4 машины / 5+/0/11-14 машин), so the
+    // title template stores a `#NOUN#` sentinel that renderDigest() replaces with
+    // the pluralizeRu-selected form from digest_noun_forms. Parity stays intact:
+    // the stored title carries exactly one {count} placeholder both languages, and
+    // the sentinel is NOT a {param} token so the parity scanner ignores it.
+    // Plain push_* register (NOT the UNHINGED tier) per D-04.
+    digest_title: { title: '{count} #NOUN#' },
+    digest_body: { body: 'Откройте, чтобы посмотреть.' },
+    // 3-form noun phrase resolved at render time by pluralizeRu (one/few/many).
+    // Full adjective+noun agreement folded into each form so the rendered title
+    // reads grammatically: "1 новая машина" / "3 новые машины" / "5 новых машин".
+    digest_noun_forms: {
+      one: 'новая машина',
+      few: 'новые машины',
+      many: 'новых машин',
+    },
   },
   EN: {
     new_match: {
@@ -89,6 +110,17 @@ const TRANSLATIONS = {
     push_booked: { title: 'Car was booked', body: 'Open to take a look.' },
     push_sold: { title: 'Car was sold', body: 'Open to take a look.' },
     push_back_available: { title: 'Car is available again', body: 'Open to take a look.' },
+
+    // Daily DIGEST set — EN parity (see RU block for the contract). EN uses a simple
+    // singular/plural noun; the same #NOUN# sentinel + {count} placeholder shape so
+    // the parity scanner sees identical {param} tokens on both sides.
+    digest_title: { title: '{count} #NOUN#' },
+    digest_body: { body: 'Open to take a look.' },
+    digest_noun_forms: {
+      one: 'new match',
+      few: 'new matches',
+      many: 'new matches',
+    },
   },
 };
 
@@ -146,8 +178,52 @@ function renderGenericPush(key, lang) {
   return { title: entry.title, body: entry.body };
 }
 
+/**
+ * Select the Russian plural form for a count using the standard 3-form rule.
+ *   mod10 === 1 && mod100 !== 11            → forms[0] (one):  1, 21, 101 …
+ *   mod10 in 2..4 && !(mod100 in 12..14)    → forms[1] (few):  2-4, 22-24 …
+ *   otherwise                                → forms[2] (many): 0, 5-20, 11-14 …
+ *
+ * @param {number} n - the (non-negative integer) count.
+ * @param {[string,string,string]} forms - [one, few, many] word forms.
+ * @returns {string} the selected form.
+ */
+function pluralizeRu(n, forms) {
+  const abs = Math.abs(Math.trunc(Number(n) || 0));
+  const mod10 = abs % 10;
+  const mod100 = abs % 100;
+  if (mod10 === 1 && mod100 !== 11) return forms[0];
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return forms[1];
+  return forms[2];
+}
+
+/**
+ * Render the localized daily-digest push title (+ body) for a count.
+ *
+ * The ONLY interpolated value is the integer count (T-14-01-01 — no PII). RU resolves
+ * the 3-form noun phrase via pluralizeRu; EN uses simple singular (n===1) / plural.
+ * The stored digest_title template carries `{count}` plus a `#NOUN#` sentinel that is
+ * replaced here with the selected form. This is what Plan 02's sendDigest calls.
+ *
+ * @param {'RU'|'EN'} language
+ * @param {number} count
+ * @returns {{ title: string, body: string }}
+ */
+function renderDigest(language, count) {
+  const lang = TRANSLATIONS[language] ? language : 'RU';
+  const block = TRANSLATIONS[lang];
+  const f = block.digest_noun_forms;
+  const noun = lang === 'RU'
+    ? pluralizeRu(count, [f.one, f.few, f.many])
+    : (Number(count) === 1 ? f.one : f.few);
+  const title = interpolate(block.digest_title.title, { count }, lang).replace('#NOUN#', noun);
+  return { title, body: block.digest_body.body };
+}
+
 module.exports = TRANSLATIONS;
 module.exports.render = render;
+module.exports.pluralizeRu = pluralizeRu;
+module.exports.renderDigest = renderDigest;
 module.exports.renderGenericPush = renderGenericPush;
 module.exports.formatSom = formatSom;
 module.exports.interpolate = interpolate;
