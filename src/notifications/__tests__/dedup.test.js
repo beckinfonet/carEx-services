@@ -7,6 +7,11 @@
 //     the subscription criteria; a watch-event row's deeplink starts with
 //     `carex://listing/` (the two deeplink families are built distinctly at emit time).
 
+// Phase 13: emit()'s instant-cadence path now fires the REAL fcm.send, which hits
+// DeviceToken (Mongo). These are pure unit tests with no DB, so stub the push
+// transport to a success-shaped no-op (its own coverage lives in push/fcm.test.js).
+jest.mock('../push/fcm', () => ({ send: jest.fn().mockResolvedValue({ ok: true, delivered: 0 }) }));
+
 const mongoose = require('mongoose');
 const { emit } = require('../notificationService');
 

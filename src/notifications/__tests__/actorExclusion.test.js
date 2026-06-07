@@ -4,6 +4,10 @@
 // it (seller editing their own price gets 0 self-notifications; T-12-03-02). Other
 // watchers (uid !== actorUid) still receive the notification.
 
+// Phase 13: stub the real fcm.send (now hits DeviceToken/Mongo) for these DB-less
+// unit tests; transport coverage lives in push/fcm.test.js.
+jest.mock('../push/fcm', () => ({ send: jest.fn().mockResolvedValue({ ok: true, delivered: 0 }) }));
+
 const { emit } = require('../notificationService');
 
 function makeNotificationStub() {

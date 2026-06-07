@@ -3,6 +3,10 @@
 // VALIDATION map: NSUB-04 — price_drop is emitted ONLY when newPrice < oldPrice.
 // A price increase or unchanged price emits nothing.
 
+// Phase 13: stub the real fcm.send (now hits DeviceToken/Mongo) for these DB-less
+// unit tests; transport coverage lives in push/fcm.test.js.
+jest.mock('../push/fcm', () => ({ send: jest.fn().mockResolvedValue({ ok: true, delivered: 0 }) }));
+
 const { emit } = require('../notificationService');
 
 function makeNotificationStub() {

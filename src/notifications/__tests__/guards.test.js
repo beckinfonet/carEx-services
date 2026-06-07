@@ -6,6 +6,10 @@
 // time; T-12-03-01). emit must NEVER use the includeAllUsers / includeAllListingStatuses
 // bypass flags (asserted by source grep + behavior).
 
+// Phase 13: stub the real fcm.send (now hits DeviceToken/Mongo) for these DB-less
+// unit tests; transport coverage lives in push/fcm.test.js.
+jest.mock('../push/fcm', () => ({ send: jest.fn().mockResolvedValue({ ok: true, delivered: 0 }) }));
+
 const fs = require('fs');
 const path = require('path');
 const { emit } = require('../notificationService');
