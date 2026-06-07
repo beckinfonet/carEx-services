@@ -16,6 +16,22 @@ const userSchema = new mongoose.Schema({
   logisticsRequestDate: Date,
   isPhoneVerified: { type: Boolean, default: false },
   createdAt: { type: Date, default: Date.now },
+  // Phase 12 NI18N-01: user's preferred language. Additive — no migration; absent
+  // docs read as 'RU' via the default.
+  language: { type: String, enum: ['RU', 'EN'], default: 'RU' },
+  // Phase 12 NPRF-03/04 plumbing: preference DEFAULTS land here now (D-16); the
+  // quiet-hours + daily-cap ENFORCEMENT runs in Phase 14. Mirrors the inline
+  // moderationStatus subdoc shape below.
+  notificationPrefs: {
+    muteAll: { type: Boolean, default: false },
+    savedSearchEnabled: { type: Boolean, default: true },
+    watchEnabled: { type: Boolean, default: true },
+    quietHours: {
+      start: { type: String, default: '22:00' },
+      end: { type: String, default: '08:00' },
+    },
+    dailyCap: { type: Number, default: 3 },
+  },
   moderationStatus: {
     state: { type: String, enum: ['active', 'feature_limited', 'blocked_with_review', 'permanently_banned'], default: 'active', required: true },
     severity: { type: String, enum: ['none', 'feature_limited', 'blocked_with_review', 'permanently_banned'], default: 'none' },
