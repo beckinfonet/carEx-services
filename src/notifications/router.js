@@ -24,6 +24,8 @@
 //   DELETE /subscriptions/:id  → delete own subscription (NPRF-02)
 
 const express = require('express');
+const mongoose = require('mongoose');
+const { z } = require('zod');
 const Notification = require('../models/Notification');
 const Subscription = require('../models/Subscription');
 const { createSubscriptionSchema, cadenceEnum, eventEnum } = require('./schemas');
@@ -60,7 +62,21 @@ const KNOWN_USER_ERRORS = new Set([
   'invalid_payload',          // schema gate failure
   'subscription_not_found',   // PATCH/DELETE on a non-existent / non-owned sub
   'not_owner',                // IDOR — id exists but belongs to another uid
+  'invalid_object_id',        // malformed :id route param (cast guard)
 ]);
+
+// All four watch events (D-03). A watch create that omits `events` subscribes to
+// the full set so a follower never silently misses a price_drop/booked/sold/etc.
+const ALL_WATCH_EVENTS = eventEnum.options.slice();
+
+// Validate a route :id param as a Mongo ObjectId BEFORE building a filter, so a
+// garbage id throws a clean 400 instead of a CastError 500.
+function assertObjectId(id) {
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    const err = new Error('invalid_object_id');
+    throw err;
+  }
+}
 
 function handleServiceError(err, res, tag) {
   if (KNOWN_USER_ERRORS.has(err.message)) {
@@ -162,6 +178,116 @@ router.patch('/:id/read', async (req, res) => {
     return res.status(200).json({ updated: result.modifiedCount ?? 0 });
   } catch (err) {
     return handleServiceError(err, res, 'read-one');
+  }
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// Subscription CRUD (NSUB-01/03, NPRF-01/02).
+//
+// All subscription routes are uid-scoped from the token. POST forces
+// uid = req.auth.uid server-side and IGNORES any body uid (IDOR guard,
+// T-12-04-01). PATCH/DELETE filter { _id, uid } so a caller can only touch
+// their own subscriptions.
+// ───────────────────────────────────────────────────────────────────────────
+
+// Inline edit schema (NPRF-02). The mobile manage screen only edits cadence
+// (saved_search) or events (watch). .strict() rejects unknown keys; at least one
+// editable field must be present. uid/kind/criteria/carId are immutable post-create.
+const editSubscriptionSchema = z.object({
+  cadence: cadenceEnum.optional(),
+  events: z.array(eventEnum).nonempty().optional(),
+}).strict().refine(
+  (body) => body.cadence !== undefined || body.events !== undefined,
+  { message: 'no editable fields provided' },
+);
+
+// POST /subscriptions — create a saved_search or watch subscription.
+router.post('/subscriptions', async (req, res) => {
+  const parsed = createSubscriptionSchema.safeParse(req.body || {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'invalid_payload', issues: parsed.error.issues });
+  }
+  try {
+    const uid = req.auth.uid; // server-side identity ONLY — body uid is ignored.
+    const data = parsed.data;
+
+    const doc = { uid, kind: data.kind, cadence: data.cadence || 'instant' };
+    if (data.kind === 'saved_search') {
+      doc.criteria = data.criteria;
+    } else {
+      // watch — default events to all four (D-03) when omitted.
+      doc.carId = data.carId;
+      doc.events = data.events && data.events.length ? data.events : ALL_WATCH_EVENTS.slice();
+    }
+
+    const created = await Subscription.create(doc);
+    return res.status(201).json(created.toObject());
+  } catch (err) {
+    return handleServiceError(err, res, 'create-subscription');
+  }
+});
+
+// GET /subscriptions — list the caller's ACTIVE subscriptions (NPRF-01).
+router.get('/subscriptions', async (req, res) => {
+  try {
+    const uid = req.auth.uid;
+    const items = await Subscription
+      .find({ uid, active: true })
+      .sort({ createdAt: -1 })
+      .lean();
+    return res.status(200).json({ items });
+  } catch (err) {
+    return handleServiceError(err, res, 'list-subscriptions');
+  }
+});
+
+// PATCH /subscriptions/:id — edit cadence/events on the caller's own sub (NPRF-02).
+// Filter { _id, uid } — a PATCH on another user's id matches 0 rows (IDOR).
+router.patch('/subscriptions/:id', async (req, res) => {
+  const parsed = editSubscriptionSchema.safeParse(req.body || {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'invalid_payload', issues: parsed.error.issues });
+  }
+  try {
+    assertObjectId(req.params.id);
+    const uid = req.auth.uid;
+
+    const $set = {};
+    if (parsed.data.cadence !== undefined) $set.cadence = parsed.data.cadence;
+    if (parsed.data.events !== undefined) $set.events = parsed.data.events;
+
+    const updated = await Subscription.findOneAndUpdate(
+      { _id: req.params.id, uid },
+      { $set },
+      { new: true },
+    ).lean();
+
+    if (!updated) {
+      // Either no such id, or it belongs to another uid (IDOR) — same opaque 400
+      // either way so a caller cannot probe for the existence of others' ids.
+      throw new Error('subscription_not_found');
+    }
+    return res.status(200).json(updated);
+  } catch (err) {
+    return handleServiceError(err, res, 'edit-subscription');
+  }
+});
+
+// DELETE /subscriptions/:id — remove the caller's own subscription (NPRF-02).
+// Hard delete; the past notification rows it produced are NOT touched. Filter
+// { _id, uid } so another user's id deletes 0 rows (IDOR).
+router.delete('/subscriptions/:id', async (req, res) => {
+  try {
+    assertObjectId(req.params.id);
+    const uid = req.auth.uid;
+
+    const result = await Subscription.deleteOne({ _id: req.params.id, uid });
+    if (result.deletedCount === 0) {
+      throw new Error('subscription_not_found');
+    }
+    return res.status(200).json({ deleted: result.deletedCount });
+  } catch (err) {
+    return handleServiceError(err, res, 'delete-subscription');
   }
 });
 
