@@ -25,7 +25,7 @@
 
 const { ensureInitialized } = require('../../security/firebaseAdmin');
 const DeviceToken = require('../../models/DeviceToken');
-const { renderGenericPush } = require('../translations');
+const { renderGenericPush, renderDigest } = require('../translations');
 
 // Bounded retry budget for transient/429 responses (RESEARCH Open Q3: ≈3 attempts,
 // jittered exponential). 1 initial send + up to 2 retries = 3 total attempts.
@@ -70,29 +70,27 @@ async function pruneToken(token) {
 }
 
 /**
- * Fan out an OS push to all of a user's devices.
+ * Shared fan-out core for both send() and sendDigest().
  *
- * @param {object} args
- * @param {string} args.uid - target user (DeviceToken.find source of truth).
- * @param {string} [args.titleKey] - generic push category key (e.g. 'price_drop').
- * @param {string} [args.title] - alias accepted from the legacy caller contract.
- * @param {'RU'|'EN'} [args.lang='RU'] - render language.
- * @param {object} [args.data] - routing data; ONLY data.deeplink is forwarded.
+ * Pulls the uid's DeviceToken rows, then runs the bounded jittered-backoff
+ * sendEachForMulticast loop with PRUNE_CODES → pruneToken, TRANSIENT_CODES →
+ * bounded retry, and one-bad-token-never-aborts isolation. Never throws.
+ *
+ * The CALLER supplies the already-rendered { title, body } and the
+ * already-sanitized payloadData — this helper owns NO copy/PII policy, so each
+ * caller keeps its own (generic-only for send, count-bearing for sendDigest).
+ *
+ * @param {string} uid - target user.
+ * @param {{ title: string, body: string }} notification - rendered copy.
+ * @param {object} payloadData - already-sanitized data (deeplink-only).
  * @returns {Promise<{ ok: boolean, delivered: number }>}
  */
-async function send({ uid, titleKey, title, lang = 'RU', data = {} } = {}) {
+async function fanOut(uid, notification, payloadData) {
   const rows = await DeviceToken.find({ uid }).lean();
   let tokens = (rows || []).map((r) => r.token).filter(Boolean);
   if (!tokens.length) return { ok: true, delivered: 0 };
 
-  // GENERIC param-free copy ONLY — never the caller's PII params (D-08b).
-  const categoryKey = titleKey || title;
-  const { title: pushTitle, body } = renderGenericPush(categoryKey, lang);
-
-  // Routing detail only — strip everything except the deeplink.
-  const payloadData = data && data.deeplink ? { deeplink: String(data.deeplink) } : {};
-
-  const message = { notification: { title: pushTitle, body }, data: payloadData };
+  const message = { notification, data: payloadData };
 
   const admin = ensureInitialized();
   const messaging = admin.messaging();
@@ -111,7 +109,7 @@ async function send({ uid, titleKey, title, lang = 'RU', data = {} } = {}) {
       resp = await messaging.sendEachForMulticast({ tokens, ...message });
     } catch (err) {
       // A whole-batch failure is treated as transient: back off and retry the
-      // same set, bounded by MAX_ATTEMPTS. Never throw out of send().
+      // same set, bounded by MAX_ATTEMPTS. Never throw.
       // eslint-disable-next-line no-console
       console.error('[fcm] sendEachForMulticast threw:', err && err.message);
       if (attempt >= MAX_ATTEMPTS) break;
@@ -154,4 +152,55 @@ async function send({ uid, titleKey, title, lang = 'RU', data = {} } = {}) {
   return { ok: true, delivered };
 }
 
-module.exports = { send };
+/**
+ * Build the deeplink-only payload shared by both send paths.
+ * Strips everything except the routing deeplink (D-07/D-08b PII guarantee).
+ */
+function deeplinkOnly(data) {
+  return data && data.deeplink ? { deeplink: String(data.deeplink) } : {};
+}
+
+/**
+ * Fan out an OS push to all of a user's devices.
+ *
+ * @param {object} args
+ * @param {string} args.uid - target user (DeviceToken.find source of truth).
+ * @param {string} [args.titleKey] - generic push category key (e.g. 'price_drop').
+ * @param {string} [args.title] - alias accepted from the legacy caller contract.
+ * @param {'RU'|'EN'} [args.lang='RU'] - render language.
+ * @param {object} [args.data] - routing data; ONLY data.deeplink is forwarded.
+ * @returns {Promise<{ ok: boolean, delivered: number }>}
+ */
+async function send({ uid, titleKey, title, lang = 'RU', data = {} } = {}) {
+  // GENERIC param-free copy ONLY — never the caller's PII params (D-08b).
+  const categoryKey = titleKey || title;
+  const { title: pushTitle, body } = renderGenericPush(categoryKey, lang);
+  return fanOut(uid, { title: pushTitle, body }, deeplinkOnly(data));
+}
+
+/**
+ * Fan out the daily DIGEST push to all of a user's devices.
+ *
+ * Unlike send() (which is deliberately param-free for PII safety, NPUSH-08), the
+ * digest interpolates the integer match `count` into the localized title via
+ * renderDigest. The count is a non-PII integer, so it is the ONLY value rendered
+ * into the copy — NO make/model/price/seller/location ever crosses (T-14-02-01).
+ * Like send(), only data.deeplink is forwarded into the payload data.
+ *
+ * Reuses the shared fanOut() core (cached admin, bounded jittered backoff,
+ * dead-token prune, one-bad-token isolation, never-throw).
+ *
+ * @param {object} args
+ * @param {string} args.uid - target user (DeviceToken.find source of truth).
+ * @param {number} args.count - integer match count interpolated into the title.
+ * @param {'RU'|'EN'} [args.lang='RU'] - render language.
+ * @param {object} [args.data] - routing data; ONLY data.deeplink is forwarded.
+ * @returns {Promise<{ ok: boolean, delivered: number }>}
+ */
+async function sendDigest({ uid, count, lang = 'RU', data = {} } = {}) {
+  // Count-bearing localized copy — the count is the ONLY interpolated value.
+  const { title, body } = renderDigest(lang, count);
+  return fanOut(uid, { title, body }, deeplinkOnly(data));
+}
+
+module.exports = { send, sendDigest };
