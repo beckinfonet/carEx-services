@@ -64,12 +64,38 @@ afterAll(async () => {
 });
 
 describe('Phase 14 daily digest', () => {
-  // ── Scheduling & gating (NDIG-01 / NDIG-04) ──────────────────────────────────
-  // SC1 — importing the service in a test starts NO scheduler; runDigest is callable
-  // directly (no open cron handle, no fcm call on import).
-  test.todo('NDIG-01 cron gate: importing the module under Jest starts no scheduler (require.main===module)');
-  // SC1 — cron expression built from DIGEST_HOUR is `0 8 * * *` with timezone Asia/Bishkek.
-  test.todo('NDIG-04 DIGEST_HOUR/timezone: cron expr is "0 8 * * *" with timezone Asia/Bishkek');
+  // ── Scheduling & gating (NDIG-01 / NDIG-04) — REAL assertions (Plan 04 Task 2) ─
+  // The cron lives in server.js, gated by `require.main === module`. A unit test cannot
+  // easily run server.js as a CLI entrypoint, so these rows assert the source contract:
+  // the schedule call is INSIDE the gate (never module top-level) and its expression +
+  // options derive from DIGEST_HOUR / Asia/Bishkek. The `require('./server') starts no
+  // scheduler` behavior is additionally proven by the plan's `node -e` verify step.
+  describe('NDIG-01 / NDIG-04 cron registration in server.js', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const serverSrc = fs.readFileSync(path.join(__dirname, '../../../server.js'), 'utf8');
+    const { DIGEST_HOUR } = require('../digest');
+
+    test('NDIG-01: cron.schedule is registered INSIDE the require.main === module gate (not top-level)', () => {
+      expect(serverSrc).toContain('cron.schedule');
+      const gateIdx = serverSrc.indexOf('require.main === module');
+      const cronIdx = serverSrc.indexOf('cron.schedule');
+      expect(gateIdx).toBeGreaterThan(-1);
+      expect(cronIdx).toBeGreaterThan(gateIdx); // schedule call comes after the gate opens
+      // The schedule call must sit within the gate block, before its closing brace +
+      // module.exports — i.e. before the exports line that follows the gate.
+      const exportsIdx = serverSrc.indexOf('module.exports = { app');
+      expect(cronIdx).toBeLessThan(exportsIdx);
+    });
+
+    test('NDIG-04: cron expression derives from DIGEST_HOUR (0 8 * * *) with timezone Asia/Bishkek + noOverlap', () => {
+      expect(DIGEST_HOUR).toBe(8);
+      expect(serverSrc).toMatch(/0 \$\{DIGEST_HOUR\} \* \* \*|0 8 \* \* \*/);
+      expect(serverSrc).toContain("timezone: 'Asia/Bishkek'");
+      expect(serverSrc).toContain('noOverlap');
+      expect(serverSrc).toContain('runDigest');
+    });
+  });
 
   // ── Digest bundling (NDIG-03) ────────────────────────────────────────────────
   // SC2 — 3 daily matches + 2 cap-overflow → exactly ONE push with count=5.

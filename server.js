@@ -26,6 +26,8 @@ const listingModerationRouter = require('./src/moderation/listingRouter');
 const { listingModerationRateLimiter } = require('./src/moderation/listingRateLimit');
 const notificationRouter = require('./src/notifications/router');
 const notificationService = require('./src/notifications/notificationService');
+const cron = require('node-cron');
+const { runDigest, DIGEST_HOUR } = require('./src/notifications/digest');
 const { upload, uploadMemory, s3, processAndUploadCarImages } = require('./src/uploads/carImages');
 const { confirmBooking: confirmBookingService, ProviderSuspendedError } = require('./src/payments/confirmBooking');
 // W-7: ListingNotAvailableError MUST be required from its canonical source
@@ -1509,6 +1511,29 @@ if (require.main === module) {
   app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
   });
+
+  // Phase 14 NDIG-01/NDIG-04: the in-process daily-digest cron. Registered STRICTLY
+  // inside this `require.main === module` gate so `require('./server')` under Jest never
+  // starts a real scheduler (Pitfall 4) — tests import the app without a live timer.
+  //
+  // Expression derives from DIGEST_HOUR (the single retune point in digest.js): `0 8 * * *`
+  // when DIGEST_HOUR === 8. timezone Asia/Bishkek pins the fire to 08:00 local. noOverlap
+  // skips a fire if the previous run is still in flight (DoS guard). node-cron v4 auto-starts
+  // on creation, awaits the async task, and has NO recoverMissedExecutions (catch-up was
+  // removed in v4) — a slept-through fire simply rolls to the next morning (D-02, zero code).
+  cron.schedule(
+    `0 ${DIGEST_HOUR} * * *`,
+    async () => {
+      try {
+        await runDigest({ now: new Date() });
+      } catch (err) {
+        // A digest failure must NEVER crash the process — log and let the next fire retry.
+        console.error('[cron] daily-digest run failed:', err && err.message);
+      }
+    },
+    { name: 'daily-digest', timezone: 'Asia/Bishkek', noOverlap: true },
+  );
+  console.log(`Daily-digest cron scheduled: 0 ${DIGEST_HOUR} * * * (Asia/Bishkek)`);
 }
 
 module.exports = { app, getCarDetailHandler, createPaymentIntentHandler };
