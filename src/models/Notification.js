@@ -31,6 +31,13 @@ const notificationSchema = new mongoose.Schema({
   read: { type: Boolean, default: false },
   channels: { type: [String], default: ['in_app'] },
   digestPending: { type: Boolean, default: false },
+  // Phase 14 NDIG-02 crash-safe claim marker. A digest run stamps this with its
+  // runStart ISO string when it CLAIMS a digestPending row (sibling to
+  // digestPending, NOT a digestSent marker — double-send hardening is intentionally
+  // out, see digest.js). A non-null value on a still-digestPending row means a prior
+  // run claimed it but crashed before clearing; a later run re-stamps and re-sends it
+  // (no drop). It is cleared ($unset) only when the row is successfully sent.
+  digestRunId: { type: String, default: null },
   dedupeKey: { type: String, default: null },
   createdAt: { type: Date, default: Date.now },
 });
