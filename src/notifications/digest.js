@@ -41,10 +41,22 @@
 
 const mongoose = require('mongoose');
 const defaultFcm = require('./push/fcm');
+const { NOTIFICATION_RETENTION_DAYS } = require('../models/Notification');
 
 // The single named fire-time constant (D-01). Plan 04's cron builds its expression
 // from this; it lives here as the one retune point. 08:00 Asia/Bishkek.
 const DIGEST_HOUR = 8;
+
+// Stale device-token retention (NDIG-05). A token whose lastSeenAt is older than this
+// is treated as abandoned and pruned. lastSeenAt is refreshed on EVERY device-token
+// register/refresh (router.js:315 — confirmed: the upsert $set always carries
+// lastSeenAt: new Date()), so its age is a valid liveness signal (RESEARCH A2). 90 days
+// unseen ≈ 3 months — FCM would also reject such a token on the next real send, so this
+// is the EXTRA/stale layer, NON-DUPLICATIVE with fcm.send's send-time pruneToken (which
+// only removes tokens FCM actively rejects). Same value as the notification retention.
+const TOKEN_STALE_DAYS = 90;
+
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 // The Notification-Center deeplink (Plan 05 wires this route on mobile).
 const DIGEST_DEEPLINK = 'carex://notifications';
@@ -78,6 +90,9 @@ async function runDigest({ now = new Date(), deps = {} } = {}) {
   // Read the claimed set back (lean — read-only grouping work).
   const claimed = await Notification.find({ digestPending: true, digestRunId: runId }).lean();
   if (!claimed.length) {
+    // No flush work, but the same run still owes its retention prune (NDIG-05/NDOM-06):
+    // an idle digest morning must still reap 90-day notifications + stale tokens.
+    await prune(runStart, deps);
     return { claimed: 0, users: 0, sent: 0, cleared: 0 };
   }
 
@@ -146,7 +161,44 @@ async function runDigest({ now = new Date(), deps = {} } = {}) {
     }
   }
 
+  // (6) SAME-RUN RETENTION PRUNE (NDIG-05/NDOM-06) — after the flush, bounded + non-fatal.
+  await prune(runStart, deps);
+
   return { claimed: claimed.length, users: Object.keys(byUid).length, sent, cleared };
 }
 
-module.exports = { runDigest, DIGEST_HOUR };
+/**
+ * Same-run retention prune (NDIG-05 / NDOM-06). Runs at the END of a digest, AFTER the
+ * flush, so the morning cron does double duty. Two date-BOUNDED deletes (never an
+ * unconditional deleteMany — T-14-04-01):
+ *   1. Notifications older than NOTIFICATION_RETENTION_DAYS (90) by createdAt.
+ *   2. DeviceTokens whose lastSeenAt is older than TOKEN_STALE_DAYS (90). This is the
+ *      EXTRA/stale layer: fcm.send already prunes FCM-REJECTED tokens at send time
+ *      (pruneToken → DeviceToken.deleteOne); this targets tokens that simply went quiet
+ *      (lastSeenAt is refreshed on every register/refresh — router.js:315), so the two
+ *      are non-duplicative.
+ *
+ * Wrapped end-to-end: a prune failure is LOGGED but NEVER thrown out of runDigest — a
+ * prune error must never block or re-fire the flush.
+ */
+async function prune(now, deps = {}) {
+  const Notification = deps.Notification || mongoose.model('Notification');
+  const DeviceToken = deps.DeviceToken || mongoose.model('DeviceToken');
+  const at = now instanceof Date ? now : new Date(now);
+
+  try {
+    const notifCutoff = new Date(at.getTime() - NOTIFICATION_RETENTION_DAYS * DAY_MS);
+    // BOUNDED: only rows strictly older than the 90-day cutoff (a fresh row is kept).
+    await Notification.deleteMany({ createdAt: { $lt: notifCutoff } });
+
+    const tokenCutoff = new Date(at.getTime() - TOKEN_STALE_DAYS * DAY_MS);
+    // BOUNDED: only tokens unseen since before the stale cutoff (a recent token is kept).
+    await DeviceToken.deleteMany({ lastSeenAt: { $lt: tokenCutoff } });
+  } catch (err) {
+    // Non-fatal: a prune error must never escape runDigest (no re-fire, no flush block).
+    // eslint-disable-next-line no-console
+    console.error('[digest] retention prune failed (non-fatal):', err && err.message);
+  }
+}
+
+module.exports = { runDigest, prune, DIGEST_HOUR, TOKEN_STALE_DAYS };
