@@ -15,8 +15,42 @@
 // require.main === module gate (NDIG-01): importing the service/digest module from a
 // test MUST NOT start the cron — the scaffold asserts this once the module exists.
 
+// ── firebase-admin + DeviceToken mocks for the sendDigest unit test (NDIG-03) ──
+// Mirrors the fcm.test.js harness. These mocks are file-wide but the translation /
+// pluralize tests below never touch firebaseAdmin or the DeviceToken model, so they
+// are unaffected.
+const mockSendEachForMulticast = jest.fn();
+const mockMessaging = jest.fn(() => ({ sendEachForMulticast: mockSendEachForMulticast }));
+
+jest.mock('../../security/firebaseAdmin', () => ({
+  ensureInitialized: jest.fn(() => ({ messaging: mockMessaging })),
+}));
+
+const mockFind = jest.fn();
+const mockDeleteOne = jest.fn(() => Promise.resolve({ deletedCount: 1 }));
+jest.mock('../../models/DeviceToken', () => ({
+  find: (...args) => mockFind(...args),
+  deleteOne: (...args) => mockDeleteOne(...args),
+}));
+
 const { startReplSet, stopReplSet } = require('../../../__tests__/_helpers/mongoReplSet');
 const { pluralizeRu, renderDigest } = require('../translations');
+const { ensureInitialized } = require('../../security/firebaseAdmin');
+const { sendDigest } = require('../push/fcm');
+
+// Helpers mirroring fcm.test.js.
+function mockTokens(rows) {
+  mockFind.mockReturnValue({ lean: () => Promise.resolve(rows) });
+}
+function multicastResponse(responses) {
+  return {
+    successCount: responses.filter((r) => r.success).length,
+    failureCount: responses.filter((r) => !r.success).length,
+    responses,
+  };
+}
+const okResp = () => ({ success: true, messageId: 'mid-' + Math.random() });
+const errResp = (code) => ({ success: false, error: { code } });
 
 let replset;
 
@@ -38,7 +72,75 @@ describe('Phase 14 daily digest', () => {
 
   // ── Digest bundling (NDIG-03) ────────────────────────────────────────────────
   // SC2 — 3 daily matches + 2 cap-overflow → exactly ONE push with count=5.
-  test.todo('NDIG-03 one-push-count: 5 digestPending rows for one uid → sendDigest called once with count:5');
+  describe('NDIG-03 sendDigest one-push-count', () => {
+    beforeEach(() => {
+      jest.clearAllMocks();
+      mockSendEachForMulticast.mockReset();
+      mockDeleteOne.mockResolvedValue({ deletedCount: 1 });
+    });
+
+    test('sendDigest is exported alongside send', () => {
+      const fcm = require('../push/fcm');
+      expect(typeof fcm.sendDigest).toBe('function');
+      expect(typeof fcm.send).toBe('function');
+    });
+
+    test('5 digestPending rows for one uid → ONE sendEachForMulticast with the count=5 RU title, only { deeplink } in data', async () => {
+      mockTokens([{ token: 'tok-a' }, { token: 'tok-b' }]);
+      mockSendEachForMulticast.mockResolvedValueOnce(multicastResponse([okResp(), okResp()]));
+
+      const result = await sendDigest({
+        uid: 'u1',
+        count: 5,
+        lang: 'RU',
+        data: { deeplink: 'carex://notifications' },
+      });
+
+      // Exactly one fan-out call carrying ALL of the uid's tokens.
+      expect(mockSendEachForMulticast).toHaveBeenCalledTimes(1);
+      const arg = mockSendEachForMulticast.mock.calls[0][0];
+      expect(arg.tokens).toEqual(['tok-a', 'tok-b']);
+
+      // Title is the RU машин-form for 5 with the integer count interpolated.
+      const expectedTitle = renderDigest('RU', 5).title;
+      expect(arg.notification.title).toBe(expectedTitle);
+      expect(arg.notification.title).toContain('5');
+      expect(arg.notification.title).toContain('машин');
+
+      // PII guarantee (T-14-02-01): data carries ONLY the deeplink — no count/uid/carId.
+      expect(arg.data).toEqual({ deeplink: 'carex://notifications' });
+      expect(Object.keys(arg.data)).toEqual(['deeplink']);
+      const serialized = JSON.stringify(arg);
+      expect(serialized).not.toContain('"uid"');
+      expect(serialized).not.toContain('"count"');
+      expect(serialized).not.toContain('"carId"');
+
+      expect(result).toEqual({ ok: true, delivered: 2 });
+    });
+
+    test('zero device tokens → { ok:true, delivered:0 } with no firebase-admin call', async () => {
+      mockTokens([]);
+      const result = await sendDigest({ uid: 'u-empty', count: 3, lang: 'RU' });
+      expect(result).toEqual({ ok: true, delivered: 0 });
+      expect(mockSendEachForMulticast).not.toHaveBeenCalled();
+      expect(ensureInitialized).not.toHaveBeenCalled();
+    });
+
+    test('a PRUNE_CODES error on a token prunes it and never throws', async () => {
+      mockTokens([{ token: 'good' }, { token: 'dead' }]);
+      mockSendEachForMulticast.mockResolvedValueOnce(multicastResponse([
+        okResp(),
+        errResp('messaging/registration-token-not-registered'),
+      ]));
+
+      await expect(
+        sendDigest({ uid: 'u1', count: 2, lang: 'RU', data: { deeplink: 'carex://notifications' } }),
+      ).resolves.toEqual({ ok: true, delivered: 1 });
+
+      expect(mockDeleteOne).toHaveBeenCalledTimes(1);
+      expect(mockDeleteOne).toHaveBeenCalledWith({ token: 'dead' });
+    });
+  });
 
   // ── Localization boundary (D-04) — REAL assertions (Task 2). ─────────────────
   describe('D-04 pluralizeRu boundaries', () => {
