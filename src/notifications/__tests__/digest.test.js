@@ -396,9 +396,96 @@ describe('Phase 14 daily digest', () => {
     });
   });
 
-  // ── Retention / prune (NDIG-05 / NDOM-06) ────────────────────────────────────
-  // SC4 — 90-day notifications pruned (91d deleted, 89d kept).
-  test.todo('NDIG-05/NDOM-06 90-day prune: 91d-old notification deleted, 89d-old kept');
-  // SC4 — stale device tokens pruned, non-duplicative with the send-time prune.
-  test.todo('NDIG-05 stale-token prune: stale lastSeenAt token deleted, fresh token kept');
+  // ── Retention / prune (NDIG-05 / NDOM-06) — REAL integration (Task 1, Plan 04) ─
+  // The same runDigest run prunes notifications older than 90 days and device tokens
+  // whose lastSeenAt has gone stale (the EXTRA layer beyond fcm.send's send-time
+  // pruneToken — see digest.js). The file mocks ../../models/DeviceToken for the
+  // sendDigest unit tests above, so the prune rows inject the REAL models via deps.
+  describe('prune (NDIG-05 / NDOM-06)', () => {
+    const { runDigest } = require('../digest');
+    const Notification = require('../../models/Notification');
+    const RealDeviceToken = jest.requireActual('../../models/DeviceToken');
+    const { NOTIFICATION_RETENTION_DAYS } = require('../../models/Notification');
+
+    const DAY = 24 * 60 * 60 * 1000;
+    const noopFcm = { sendDigest: jest.fn().mockResolvedValue({ ok: true, delivered: 1 }) };
+
+    beforeEach(async () => {
+      await Promise.all([Notification.deleteMany({}), RealDeviceToken.deleteMany({})]);
+      noopFcm.sendDigest.mockClear();
+    });
+
+    test('NDIG-05/NDOM-06 90-day prune: a 91d-old notification is deleted, an 89d-old is kept', async () => {
+      const now = new Date('2026-06-07T08:00:00.000Z');
+      // Boundary rows around NOTIFICATION_RETENTION_DAYS (90). Not digestPending — pure
+      // retention rows that the flush ignores but the prune must reap by age.
+      const old91 = await Notification.create({
+        uid: 'ret', kind: 'saved_search', titleKey: 'new_match', bodyKey: 'new_match',
+        createdAt: new Date(now.getTime() - 91 * DAY),
+      });
+      const fresh89 = await Notification.create({
+        uid: 'ret', kind: 'saved_search', titleKey: 'new_match', bodyKey: 'new_match',
+        createdAt: new Date(now.getTime() - 89 * DAY),
+      });
+
+      await runDigest({ now, deps: { fcm: noopFcm, DeviceToken: RealDeviceToken } });
+
+      expect(await Notification.findById(old91._id)).toBeNull(); // 91d > 90 → pruned
+      expect(await Notification.findById(fresh89._id)).not.toBeNull(); // 89d < 90 → kept
+      // The retention threshold is the model constant (not a magic number).
+      expect(NOTIFICATION_RETENTION_DAYS).toBe(90);
+    });
+
+    test('NDIG-05 stale-token prune: a stale-lastSeenAt token is deleted, a fresh token is kept', async () => {
+      const now = new Date('2026-06-07T08:00:00.000Z');
+      const stale = await RealDeviceToken.create({
+        uid: 'ret', token: 'stale-tok', platform: 'ios',
+        lastSeenAt: new Date(now.getTime() - 200 * DAY), // unseen ~6.5 months
+      });
+      const fresh = await RealDeviceToken.create({
+        uid: 'ret', token: 'fresh-tok', platform: 'ios',
+        lastSeenAt: new Date(now.getTime() - 1 * DAY), // seen yesterday
+      });
+
+      await runDigest({ now, deps: { fcm: noopFcm, DeviceToken: RealDeviceToken } });
+
+      expect(await RealDeviceToken.findById(stale._id)).toBeNull(); // stale → pruned
+      expect(await RealDeviceToken.findById(fresh._id)).not.toBeNull(); // fresh → kept
+    });
+
+    test('T-14-04-01: both prune deleteMany calls carry a date-bounded filter (no unconditional delete)', async () => {
+      const now = new Date('2026-06-07T08:00:00.000Z');
+      const notifSpy = jest.spyOn(Notification, 'deleteMany');
+      const tokenSpy = jest.spyOn(RealDeviceToken, 'deleteMany');
+
+      await runDigest({ now, deps: { fcm: noopFcm, DeviceToken: RealDeviceToken } });
+
+      // The notification prune call (the flush itself never deletes notifications).
+      const notifCall = notifSpy.mock.calls.find(
+        (c) => c[0] && c[0].createdAt && c[0].createdAt.$lt,
+      );
+      expect(notifCall).toBeTruthy();
+      expect(notifCall[0].createdAt.$lt).toBeInstanceOf(Date);
+
+      const tokenCall = tokenSpy.mock.calls.find(
+        (c) => c[0] && c[0].lastSeenAt && c[0].lastSeenAt.$lt,
+      );
+      expect(tokenCall).toBeTruthy();
+      expect(tokenCall[0].lastSeenAt.$lt).toBeInstanceOf(Date);
+
+      notifSpy.mockRestore();
+      tokenSpy.mockRestore();
+    });
+
+    test('prune failure is non-fatal: a throwing prune does not throw out of runDigest', async () => {
+      const now = new Date('2026-06-07T08:00:00.000Z');
+      // A DeviceToken stub whose deleteMany rejects — prune must swallow it.
+      const ExplodingTokens = {
+        deleteMany: jest.fn().mockRejectedValue(new Error('boom')),
+      };
+      await expect(
+        runDigest({ now, deps: { fcm: noopFcm, DeviceToken: ExplodingTokens } }),
+      ).resolves.toBeDefined();
+    });
+  });
 });
