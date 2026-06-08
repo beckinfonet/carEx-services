@@ -5,6 +5,7 @@
   "scripts": {
     "start": "node server.js",
     "seed-taxonomy": "node seed-vehicle-taxonomy.js",
+    "trigger-digest": "node trigger-digest.js",
     "test": "jest",
     "test:watch": "jest --watch"
   },
