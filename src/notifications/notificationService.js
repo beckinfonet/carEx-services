@@ -88,9 +88,23 @@ async function resolveQuery(maybeQuery) {
   return q;
 }
 
+// Resolve a registered mongoose model by name, returning null instead of throwing if
+// it isn't registered. Lets the broadcast branch no-op in DB-less DI tests that exercise
+// only the saved-search path and inject no DeviceToken/User (production registers both).
+function safeModel(name) {
+  try {
+    return mongoose.model(name);
+  } catch (e) {
+    return null;
+  }
+}
+
 // Map an emit event type to the i18n title/body keys stored on the Notification row.
 const KEYS_BY_EVENT = {
   new_listing: { titleKey: 'new_match', bodyKey: 'new_match' },
+  // Broadcast (all-users) new-listing copy — distinct from the saved-search new_match
+  // copy. The broadcast branch supplies these literals directly; kept here for clarity.
+  new_listing_broadcast: { titleKey: 'new_listing', bodyKey: 'new_listing' },
   price_drop: { titleKey: 'price_drop', bodyKey: 'price_drop' },
   booked: { titleKey: 'booked', bodyKey: 'booked' },
   sold: { titleKey: 'sold', bodyKey: 'sold' },
@@ -254,6 +268,98 @@ async function emit(event, deps = {}) {
     }
 
     written.push(row);
+  }
+
+  // ── new_listing broadcast (Phase 15, Reqs 1-6) ─────────────────────────────
+  // Fan a brand-new ACTIVE listing out to ALL push-enabled, category-enabled,
+  // actor-excluded, saved-search-excluded users. This branch sits AFTER the
+  // saved-search write loop and AFTER the `visible` hide-hook guard above — it
+  // REUSES the already-hide-hook'd `visible` Car (a hidden/non-active listing
+  // returned [] earlier, so reaching here means the listing is active). It NEVER
+  // re-fetches the Car and NEVER uses a hide-hook bypass flag (T-15-03; grep-gated).
+  if (eventType === 'new_listing') {
+    // Resolve the broadcast collaborators. Prefer injected deps; fall back to the
+    // registered mongoose models. If neither exists (a DB-less DI test that exercises
+    // only the saved-search path and injects no DeviceToken/User), skip the broadcast
+    // gracefully — production always has both models registered.
+    const DeviceToken = deps.DeviceToken || safeModel('DeviceToken');
+    const User = deps.User || safeModel('User');
+    if (!DeviceToken || !User) return written;
+
+    const now = event.now || new Date();
+    const boundary = bishkekMorningBoundary(now);
+
+    // Saved-search wins (Req 2): every uid that just got a new_match row is excluded
+    // from the broadcast — the saved-search copy is their single notification for L.
+    // (For a brand-new car a pre-existing unread new_match cannot exist — A3/D-10.)
+    const ssUids = new Set(written.map((r) => r.uid));
+
+    // Audience source of truth: distinct token-holding uids (D-02). Exclude the actor
+    // (Req 1 self-notify, T-15-02) and the saved-search-matched uids (Req 2).
+    const tokenUids = await resolveQuery(DeviceToken.distinct('uid'));
+    const candidate = (tokenUids || []).filter((u) => u && u !== event.actorUid && !ssUids.has(u));
+    const candidateSet = new Set(candidate);
+
+    if (candidate.length) {
+      // Eligible recipients: $ne so legacy docs (absent field) read as ENABLED (Req 5).
+      // MUST select dailyCap (R-01 per-recipient cap) AND language (per-recipient push
+      // localization — without it EN recipients get RU copy).
+      const recipients = await resolveQuery(
+        User.find({
+          firebaseUid: { $in: candidate },
+          'notificationPrefs.muteAll': { $ne: true },
+          'notificationPrefs.newListingEnabled': { $ne: false },
+        }).select('firebaseUid notificationPrefs.dailyCap language'),
+      );
+
+      for (const u of recipients || []) {
+        const uid = u.firebaseUid;
+        // Defense-in-depth: honor the $in audience locally so an actor / saved-search
+        // uid can never slip through (Req 1/2) regardless of the query layer.
+        if (!candidateSet.has(uid)) continue;
+        const dedupeKey = `${carId}:new_listing_broadcast`;
+
+        // Dedup — distinct broadcast key, NO collision with `${carId}:new_match`
+        // (Pitfall 3). At most one unread broadcast row per (uid, carId).
+        const existing = await resolveQuery(Notification.findOne({ uid, dedupeKey, read: false }));
+        if (existing) continue;
+
+        // Per-user daily push cap (Req 4 / R-01). cap = recipient dailyCap (fallback 3).
+        // Count only ACTUALLY-SENT broadcast pushes (pushSuppressed:{$ne:true}) since the
+        // Bishkek morning boundary — NOT total rows (Pitfall 2). The in-app row is uncapped.
+        const cap = (u.notificationPrefs && u.notificationPrefs.dailyCap) ?? 3;
+        const sentToday = await Notification.countDocuments({
+          uid,
+          kind: 'new_listing',
+          pushSuppressed: { $ne: true },
+          createdAt: { $gte: boundary },
+        });
+        const suppress = sentToday >= cap;
+
+        // ALWAYS write the in-app row (Req 3/4 — uncapped). PII-free: generic copy +
+        // a category deeplink to the browse surface, no carId/searchId (D-06/D-08).
+        const data = { deeplink: 'carex://search', carId: null, searchId: null };
+        const [row] = await Notification.create([{
+          uid,
+          kind: 'new_listing',
+          titleKey: 'new_listing',
+          bodyKey: 'new_listing',
+          params: {},
+          data,
+          dedupeKey,
+          pushSuppressed: suppress,
+          digestPending: false,
+        }]);
+
+        // Push only when under cap (Req 3/4 / D-07). lang from the recipient User so
+        // RU/EN copy renders per-recipient (the .select above includes language).
+        if (!suppress) {
+          await fcm.send({ uid, titleKey: 'new_listing', lang: u.language, data });
+        }
+
+        written.push(row);
+      }
+    }
   }
 
   return written;
