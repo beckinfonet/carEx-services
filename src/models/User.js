@@ -26,6 +26,10 @@ const userSchema = new mongoose.Schema({
     muteAll: { type: Boolean, default: false },
     savedSearchEnabled: { type: Boolean, default: true },
     watchEnabled: { type: Boolean, default: true },
+    // Phase 15 D-11 / Req 5: broadcast new-listing opt-out toggle. Default ON
+    // (opt-out semantics) — absent docs read as enabled via the default, and the
+    // broadcast branch keys on `{ $ne: false }` so legacy docs are eligible.
+    newListingEnabled: { type: Boolean, default: true },
     quietHours: {
       start: { type: String, default: '22:00' },
       end: { type: String, default: '08:00' },
