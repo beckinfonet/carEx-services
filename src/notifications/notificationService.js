@@ -36,9 +36,48 @@
 const mongoose = require('mongoose');
 const defaultMatchSavedSearches = require('./matchSavedSearches');
 const defaultFcm = require('./push/fcm');
+// D-04: share the single morning fire-time constant with the digest worker so the
+// broadcast cap-window and the digest cron retune from the SAME clock (digest.js is the
+// one retune point). 08:00 Asia/Bishkek.
+const { DIGEST_HOUR } = require('./digest');
 
 // Watch event families (per-car follow). new_listing is the saved-search family.
 const WATCH_EVENTS = ['price_drop', 'booked', 'sold', 'back_available'];
+
+// Asia/Bishkek is a fixed UTC+06:00 offset, no DST (milestone constraint: no TZ lib).
+const BISHKEK_OFFSET_MIN = 6 * 60;
+
+// bishkekMorningBoundary(now) → the most-recent DIGEST_HOUR:00 Asia/Bishkek instant
+// at or before `now`, as a UTC Date. This is the per-user daily-cap window start: a
+// broadcast push "today" is any push since this boundary. Pure offset math (RESEARCH
+// Pattern 4): shift `now` into Bishkek local time, floor to today's 08:00 local, then
+// shift back to UTC. If `now` is before today's 08:00 Bishkek, roll back one day.
+function bishkekMorningBoundary(now) {
+  const at = now instanceof Date ? now : new Date(now);
+  // Local (Bishkek) wall-clock as a UTC-shifted instant.
+  const localMs = at.getTime() + BISHKEK_OFFSET_MIN * 60 * 1000;
+  const local = new Date(localMs);
+  // Floor to DIGEST_HOUR:00:00.000 on the same Bishkek calendar day.
+  let boundaryLocal = Date.UTC(
+    local.getUTCFullYear(),
+    local.getUTCMonth(),
+    local.getUTCDate(),
+    DIGEST_HOUR, 0, 0, 0,
+  );
+  // If `now` is earlier than today's 08:00 Bishkek, the active window opened yesterday.
+  if (boundaryLocal > localMs) boundaryLocal -= 24 * 60 * 60 * 1000;
+  // Shift the Bishkek-local boundary back to a real UTC instant.
+  return new Date(boundaryLocal - BISHKEK_OFFSET_MIN * 60 * 1000);
+}
+
+// uidOf widens the target reads so the emit loop accepts BOTH the legacy
+// saved-search/watch target shape ({ sub:{ uid, cadence, kind } }) AND the new
+// broadcast target shape ({ uid }). RESEARCH Pattern 2 / Pitfall 4: the old
+// `t.sub && t.sub.uid` short-circuit would silently DROP a {uid}-shaped broadcast
+// target — this helper fixes that without changing existing-path behavior.
+function uidOf(t) {
+  return (t && t.uid) || (t && t.sub && t.sub.uid);
+}
 
 // Resolve a mongoose query OR a test stub. Production models return a Query with
 // .lean(); injected unit-test stubs may return a plain value/Promise. This keeps the
@@ -171,13 +210,14 @@ async function emit(event, deps = {}) {
   const targets = await resolveTargets(event, visible, deps);
 
   // (c) actor-exclusion — never notify the actor who caused the event (T-12-03-02).
-  const filtered = targets.filter((t) => t.sub && t.sub.uid && t.sub.uid !== event.actorUid);
+  // uidOf widening accepts both legacy {sub.uid} and broadcast {uid} target shapes.
+  const filtered = targets.filter((t) => uidOf(t) && uidOf(t) !== event.actorUid);
 
   const makeModel = makeModelLabel(visible);
   const written = [];
 
   for (const target of filtered) {
-    const uid = target.sub.uid;
+    const uid = uidOf(target);
     const rowEventType = target.eventType;
     const dedupeKey = `${carId}:${rowEventType}`;
 
@@ -195,11 +235,11 @@ async function emit(event, deps = {}) {
 
     const keys = KEYS_BY_EVENT[eventType] || KEYS_BY_EVENT[rowEventType] || { titleKey: rowEventType, bodyKey: rowEventType };
 
-    const cadence = target.sub.cadence || 'instant';
+    const cadence = (target.sub && target.sub.cadence) || 'instant';
 
     const [row] = await Notification.create([{
       uid,
-      kind: target.sub.kind,
+      kind: (target.sub && target.sub.kind) || 'new_listing',
       titleKey: keys.titleKey,
       bodyKey: keys.bodyKey,
       params,
