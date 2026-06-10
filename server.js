@@ -539,9 +539,39 @@ app.get('/api/users/:uid', async (req, res) => {
   }
 });
 
+// Phase 15 R-02 / T-15-01 mass-assignment defense: build a dot-path $set update from
+// an allowlisted, type-checked notificationPrefs body. Only known keys, each type-checked,
+// become dot-paths so a partial patch never clobbers sibling pref fields. Unknown /
+// wrong-typed keys are silently dropped. The exact allowlisted dot-paths persisted are:
+//   notificationPrefs.muteAll, notificationPrefs.savedSearchEnabled,
+//   notificationPrefs.watchEnabled, notificationPrefs.newListingEnabled,
+//   notificationPrefs.dailyCap, notificationPrefs.quietHours.start/.end
+const NOTIFICATION_PREF_BOOL_KEYS = ['muteAll', 'savedSearchEnabled', 'watchEnabled', 'newListingEnabled'];
+function buildNotificationPrefUpdate(notificationPrefs) {
+  const update = {};
+  if (!notificationPrefs || typeof notificationPrefs !== 'object') return update;
+  for (const key of NOTIFICATION_PREF_BOOL_KEYS) {
+    if (typeof notificationPrefs[key] === 'boolean') {
+      update[`notificationPrefs.${key}`] = notificationPrefs[key];
+    }
+  }
+  if (typeof notificationPrefs.dailyCap === 'number') {
+    update['notificationPrefs.dailyCap'] = notificationPrefs.dailyCap;
+  }
+  if (notificationPrefs.quietHours && typeof notificationPrefs.quietHours === 'object') {
+    if (typeof notificationPrefs.quietHours.start === 'string') {
+      update['notificationPrefs.quietHours.start'] = notificationPrefs.quietHours.start;
+    }
+    if (typeof notificationPrefs.quietHours.end === 'string') {
+      update['notificationPrefs.quietHours.end'] = notificationPrefs.quietHours.end;
+    }
+  }
+  return update;
+}
+
 app.put('/api/users/:uid', async (req, res) => {
   try {
-    const { firstName, lastName, phoneNumber, telegramUsername, avatarUrl, language } = req.body;
+    const { firstName, lastName, phoneNumber, telegramUsername, avatarUrl, language, notificationPrefs } = req.body;
     const update = {};
     if (firstName !== undefined) update.firstName = firstName;
     if (lastName !== undefined) update.lastName = lastName;
@@ -551,9 +581,13 @@ app.put('/api/users/:uid', async (req, res) => {
     // NI18N-01: language is enum-guarded — only the RU/EN values are persisted;
     // any out-of-enum value is ignored (T-12-05-04 tampering mitigation).
     if (language !== undefined && ['RU', 'EN'].includes(language)) update.language = language;
+    // Phase 15 R-02: persist allowlisted notificationPrefs via dot-path $set so a
+    // partial patch never clobbers siblings; unknown/wrong-typed keys dropped (T-15-01).
+    Object.assign(update, buildNotificationPrefUpdate(notificationPrefs));
     const user = await User.findOneAndUpdate(
+      // IDOR-safe (T-15-04): keys on the PATH uid only; a body uid/firebaseUid is never read.
       { firebaseUid: req.params.uid },
-      update,
+      { $set: update },
       { new: true }
     );
     res.json(user);
