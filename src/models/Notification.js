@@ -31,6 +31,12 @@ const notificationSchema = new mongoose.Schema({
   read: { type: Boolean, default: false },
   channels: { type: [String], default: ['in_app'] },
   digestPending: { type: Boolean, default: false },
+  // Phase 15 Req 4 / D-06 cap-counting marker. Broadcast rows are ALWAYS written
+  // (in-app is uncapped); when the recipient is at their daily push cap the row is
+  // stamped pushSuppressed:true and NO fcm.send is issued. The cap count keys on
+  // pushSuppressed:{$ne:true} (legacy/absent rows read as not-suppressed). No new
+  // index — the existing {uid, createdAt:-1} index serves the date-bounded count.
+  pushSuppressed: { type: Boolean, default: false },
   // Phase 14 NDIG-02 crash-safe claim marker. A digest run stamps this with its
   // runStart ISO string when it CLAIMS a digestPending row (sibling to
   // digestPending, NOT a digestSent marker — double-send hardening is intentionally
