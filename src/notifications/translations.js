@@ -45,6 +45,15 @@ const TRANSLATIONS = {
       title: 'Авто снова в продаже',
       body: '{makeModel} снова доступно. Бронь сорвалась — ваш шанс.',
     },
+    // In-app copy for the broadcast new-listing fan-out (Phase 15 Req 7 / D-08).
+    // DISTINCT from new_match (saved-search). PII-free: zero {param} tokens — no
+    // make/model/price/seller (the broadcast row carries no per-listing detail in
+    // its copy; routing lives in the deeplink). NOT routed through
+    // KEYS_BY_EVENT.new_listing (that stays mapped to new_match for saved-search).
+    new_listing: {
+      title: 'Новые объявления',
+      body: 'Появились новые авто. Откройте, чтобы посмотреть.',
+    },
 
     // ── Generic PII-safe PUSH set (Phase 13 NPUSH-08 / D-07 / D-08b) ──────────
     // SEPARATE from the in-app copy above. The in-app bodies interpolate
@@ -60,6 +69,8 @@ const TRANSLATIONS = {
     push_booked: { title: 'Авто забронировали', body: 'Откройте, чтобы посмотреть.' },
     push_sold: { title: 'Авто продали', body: 'Откройте, чтобы посмотреть.' },
     push_back_available: { title: 'Авто снова в продаже', body: 'Откройте, чтобы посмотреть.' },
+    // Broadcast new-listing push (Phase 15 Req 7 / D-08) — generic, param-free.
+    push_new_listing: { title: 'Новые объявления', body: 'Появились новые авто. Откройте, чтобы посмотреть.' },
 
     // ── Daily DIGEST set (Phase 14 NDIG-03 / D-04) ───────────────────────────
     // ONE localized morning push bundling a buyer's pending daily-cadence matches.
@@ -103,6 +114,11 @@ const TRANSLATIONS = {
       title: 'Car is available again',
       body: '{makeModel} is back. The booking fell through — your shot.',
     },
+    // In-app broadcast new-listing copy — EN parity (see RU block for the contract).
+    new_listing: {
+      title: 'New listings',
+      body: 'New cars just landed. Open to take a look.',
+    },
 
     // Generic PII-safe PUSH set — EN parity (see RU block above for the contract).
     push_new_match: { title: 'New match for your search', body: 'Open to take a look.' },
@@ -110,6 +126,8 @@ const TRANSLATIONS = {
     push_booked: { title: 'Car was booked', body: 'Open to take a look.' },
     push_sold: { title: 'Car was sold', body: 'Open to take a look.' },
     push_back_available: { title: 'Car is available again', body: 'Open to take a look.' },
+    // Broadcast new-listing push — EN parity (generic, param-free).
+    push_new_listing: { title: 'New listings', body: 'New cars just landed. Open to take a look.' },
 
     // Daily DIGEST set — EN parity (see RU block for the contract). EN uses a simple
     // singular/plural noun; the same #NOUN# sentinel + {count} placeholder shape so
