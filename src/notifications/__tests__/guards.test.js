@@ -90,3 +90,56 @@ describe('NDOM-03 emit guards — hide-hook suppression', () => {
     expect(/\{\s*includeAll(Users|ListingStatuses)/.test(src)).toBe(false);
   });
 });
+
+// ── Phase 15 — Wave 0 (RED until 15-04) ──────────────────────────────────────
+// The broadcast (`new_listing` all-users) branch must sit AFTER the existing
+// `if (!visible || visible.status !== 'active') return [];` hide-hook guard and
+// reuse the hide-hook'd `visible` Car — it must NOT re-fetch with a bypass flag.
+//
+//   Req 6 (T-15-03 TOCTOU): a hidden / non-active car → ZERO broadcast rows + ZERO pushes.
+//   Req 6 (T-15-bypass): the broadcast branch source contains the literal
+//   `new_listing_broadcast` (the branch EXISTS) while the grep gate above STILL
+//   matches zero bypass-flag object literals.
+//
+// These are RED now (no broadcast branch yet) and go GREEN after 15-04. Mirrors
+// the DI stub style above (fcm mocked, in-memory Notification stub, no live DB).
+describe('Phase 15 — broadcast branch honors hide-hook + grep gate stays green', () => {
+  // A DeviceToken stub that WOULD yield a broadcast recipient, proving suppression
+  // is the hide-hook (not an empty audience).
+  function makeDeviceTokenStub() {
+    return { async distinct() { return ['buyer-1']; } };
+  }
+  // A User stub that WOULD yield an eligible push-enabled recipient.
+  function makeUserStub() {
+    const chain = { select() { return chain; }, async lean() { return [{ firebaseUid: 'buyer-1', notificationPrefs: {} }]; } };
+    return { find() { return chain; } };
+  }
+
+  test('hidden / non-active car → 0 broadcast rows AND 0 fcm.send (reuses visible guard, no bypass re-fetch)', async () => {
+    for (const carDoc of [null, { _id: 'car-1', status: 'suspended', price: 15000 }, { _id: 'car-1', status: 'archived' }]) {
+      const Notification = makeNotificationStub();
+      const fcm = require('../push/fcm');
+      fcm.send.mockClear();
+      const Car = { async findById() { return carDoc; } };
+
+      const result = await emit(
+        { type: 'new_listing', carId: 'car-1', actorUid: 'seller-1' },
+        { Car, Notification, DeviceToken: makeDeviceTokenStub(), User: makeUserStub(), matchSavedSearches: async () => [] }
+      );
+
+      const broadcastRows = Notification.rows.filter((r) => r.dedupeKey === 'car-1:new_listing_broadcast');
+      expect(broadcastRows).toHaveLength(0);
+      expect(result).toEqual([]);
+      expect(fcm.send).not.toHaveBeenCalled();
+    }
+  });
+
+  test('broadcast branch source contains the `new_listing_broadcast` literal while the bypass-flag grep gate stays green', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'notificationService.js'), 'utf8');
+    // Presence: the broadcast branch exists.
+    expect(src.includes('new_listing_broadcast')).toBe(true);
+    // The pre-existing grep gate MUST still hold with the new branch present.
+    expect(src.includes('.setOptions(')).toBe(false);
+    expect(/\{\s*includeAll(Users|ListingStatuses)/.test(src)).toBe(false);
+  });
+});
