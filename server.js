@@ -25,6 +25,7 @@ const moderationRouter = require('./src/moderation/router');
 const listingModerationRouter = require('./src/moderation/listingRouter');
 const { listingModerationRateLimiter } = require('./src/moderation/listingRateLimit');
 const notificationRouter = require('./src/notifications/router');
+const carRequestsRouter = require('./src/carRequests/router');
 const notificationService = require('./src/notifications/notificationService');
 const cron = require('node-cron');
 const { runDigest, DIGEST_HOUR } = require('./src/notifications/digest');
@@ -1101,6 +1102,7 @@ app.use('/api/admin/moderation/listings', verifyIdToken, requireAdmin, listingMo
 // notification feed + subscriptions (the router scopes every query to
 // req.auth.uid for IDOR safety). Deliberately not admin-gated.
 app.use('/api/notifications', verifyIdToken, notificationRouter);
+app.use('/api/car-requests', verifyIdToken, carRequestsRouter);
 
 // Check if current user is an admin
 app.get('/api/admin/status/:uid', async (req, res) => {
