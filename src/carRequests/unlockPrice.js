@@ -13,4 +13,14 @@ function getUnlockPrice() {
   return { amount, currency };
 }
 
-module.exports = { getUnlockPrice, DEFAULT_AMOUNT, DEFAULT_CURRENCY };
+/**
+ * Escape hatch for the unlock paywall. Default OFF — when false, unlocks are
+ * free (no Stripe). Flip REQUEST_UNLOCK_ENABLED=true on Railway to require
+ * payment, with no mobile release. Strict equality so only the literal "true"
+ * enables billing.
+ */
+function isPaywallEnabled() {
+  return process.env.REQUEST_UNLOCK_ENABLED === 'true';
+}
+
+module.exports = { getUnlockPrice, isPaywallEnabled, DEFAULT_AMOUNT, DEFAULT_CURRENCY };

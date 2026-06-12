@@ -547,7 +547,7 @@ app.get('/api/users/:uid', async (req, res) => {
 //   notificationPrefs.muteAll, notificationPrefs.savedSearchEnabled,
 //   notificationPrefs.watchEnabled, notificationPrefs.newListingEnabled,
 //   notificationPrefs.dailyCap, notificationPrefs.quietHours.start/.end
-const NOTIFICATION_PREF_BOOL_KEYS = ['muteAll', 'savedSearchEnabled', 'watchEnabled', 'newListingEnabled'];
+const NOTIFICATION_PREF_BOOL_KEYS = ['muteAll', 'savedSearchEnabled', 'watchEnabled', 'newListingEnabled', 'requestUnlockEnabled'];
 function buildNotificationPrefUpdate(notificationPrefs) {
   const update = {};
   if (!notificationPrefs || typeof notificationPrefs !== 'object') return update;

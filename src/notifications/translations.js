@@ -72,6 +72,13 @@ const TRANSLATIONS = {
     // Broadcast new-listing push (Phase 15 Req 7 / D-08) — generic, param-free.
     push_new_listing: { title: 'Новые объявления', body: 'Появились новые авто. Откройте, чтобы посмотреть.' },
 
+    // ── Slice 3: seller unlocked a buyer's request contact ───────────────────
+    request_unlock: {
+      title: 'Продавец заинтересован',
+      body: 'Продавец заинтересован в вашей заявке: {makeModel}. Откройте, чтобы посмотреть.',
+    },
+    push_request_unlock: { title: 'Продавец заинтересован', body: 'Откройте, чтобы посмотреть.' },
+
     // ── Daily DIGEST set (Phase 14 NDIG-03 / D-04) ───────────────────────────
     // ONE localized morning push bundling a buyer's pending daily-cadence matches.
     // The ONLY dynamic value is the integer {count} (T-14-01-01 — no make/model/
@@ -128,6 +135,13 @@ const TRANSLATIONS = {
     push_back_available: { title: 'Car is available again', body: 'Open to take a look.' },
     // Broadcast new-listing push — EN parity (generic, param-free).
     push_new_listing: { title: 'New listings', body: 'New cars just landed. Open to take a look.' },
+
+    // Slice 3: seller unlocked a buyer's request contact — EN parity.
+    request_unlock: {
+      title: 'A seller is interested',
+      body: 'A seller is interested in your request: {makeModel}. Tap to view.',
+    },
+    push_request_unlock: { title: 'A seller is interested', body: 'Tap to view.' },
 
     // Daily DIGEST set — EN parity (see RU block for the contract). EN uses a simple
     // singular/plural noun; the same #NOUN# sentinel + {count} placeholder shape so

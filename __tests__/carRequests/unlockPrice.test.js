@@ -29,3 +29,29 @@ describe('getUnlockPrice', () => {
     expect(getUnlockPrice().amount).toBe(500);
   });
 });
+
+const { isPaywallEnabled } = require('../../src/carRequests/unlockPrice');
+
+describe('isPaywallEnabled', () => {
+  const ORIGINAL_ENV = { ...process.env };
+  afterEach(() => {
+    process.env = { ...ORIGINAL_ENV };
+  });
+
+  it('defaults to false when the env is unset', () => {
+    delete process.env.REQUEST_UNLOCK_ENABLED;
+    expect(isPaywallEnabled()).toBe(false);
+  });
+
+  it('is true only for the exact string "true"', () => {
+    process.env.REQUEST_UNLOCK_ENABLED = 'true';
+    expect(isPaywallEnabled()).toBe(true);
+  });
+
+  it('is false for any other truthy-looking value', () => {
+    process.env.REQUEST_UNLOCK_ENABLED = '1';
+    expect(isPaywallEnabled()).toBe(false);
+    process.env.REQUEST_UNLOCK_ENABLED = 'yes';
+    expect(isPaywallEnabled()).toBe(false);
+  });
+});
