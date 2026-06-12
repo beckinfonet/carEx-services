@@ -2,6 +2,8 @@ const express = require('express');
 const mongoose = require('mongoose');
 const CarRequest = require('../models/CarRequest');
 const { validateRequestInput } = require('./validateRequestInput');
+const { getUnlockPrice } = require('./unlockPrice');
+const { redactForSeller } = require('./redactForSeller');
 
 const router = express.Router();
 
@@ -35,6 +37,14 @@ async function resolveMakeModel(makeId, modelId) {
     if (!modelDoc) return { error: 'invalid_model' };
   }
   return { makeDoc, modelDoc };
+}
+
+// Load the caller and require APPROVED seller status. Returns the user or null.
+async function getApprovedSeller(uid) {
+  if (!uid) return null;
+  const user = await getUser().findOne({ firebaseUid: uid }).lean();
+  if (!user || user.sellerStatus !== 'APPROVED') return null;
+  return user;
 }
 
 // POST /api/car-requests — create
@@ -86,6 +96,42 @@ router.get('/mine', async (req, res) => {
     return res.json(rows);
   } catch (err) {
     console.error('[car-requests] mine error:', err);
+    return res.status(500).json({ error: 'internal_error', message: err.message });
+  }
+});
+
+// GET /api/car-requests — seller browse of OPEN, non-expired requests (contact redacted)
+router.get('/', async (req, res) => {
+  try {
+    const callerUid = req.auth && req.auth.uid;
+    if (!callerUid) return res.status(401).json({ error: 'unauthorized' });
+
+    const seller = await getApprovedSeller(callerUid);
+    if (!seller) return res.status(403).json({ error: 'not_approved_seller' });
+
+    const filter = {
+      status: 'open',
+      expiresAt: { $gt: new Date() },
+      buyerUid: { $ne: callerUid }, // never surface the seller's own requests
+    };
+    if (req.query.makeId && mongoose.isValidObjectId(req.query.makeId)) {
+      filter.makeId = req.query.makeId;
+    }
+    if (req.query.modelId && mongoose.isValidObjectId(req.query.modelId)) {
+      filter.modelId = req.query.modelId;
+    }
+    const minBudget = Number(req.query.minBudget);
+    if (Number.isFinite(minBudget) && minBudget > 0) {
+      filter.budgetMax = { $gte: minBudget };
+    }
+
+    const rows = await CarRequest.find(filter).sort({ createdAt: -1 }).lean();
+    const { amount, currency } = getUnlockPrice();
+    // No RequestUnlock model until Slice 3 — every row is locked for now.
+    const requests = rows.map((r) => redactForSeller(r, { unlocked: false }));
+    return res.json({ unlockPrice: amount, currency, requests });
+  } catch (err) {
+    console.error('[car-requests] browse error:', err);
     return res.status(500).json({ error: 'internal_error', message: err.message });
   }
 });
@@ -166,6 +212,30 @@ router.delete('/:id', async (req, res) => {
     return res.json({ ok: true });
   } catch (err) {
     console.error('[car-requests] delete error:', err);
+    return res.status(500).json({ error: 'internal_error', message: err.message });
+  }
+});
+
+// GET /api/car-requests/:id — seller detail (contact redacted; no unlocks until Slice 3)
+router.get('/:id', async (req, res) => {
+  try {
+    const callerUid = req.auth && req.auth.uid;
+    if (!callerUid) return res.status(401).json({ error: 'unauthorized' });
+
+    const seller = await getApprovedSeller(callerUid);
+    if (!seller) return res.status(403).json({ error: 'not_approved_seller' });
+
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(404).json({ error: 'not_found' });
+    }
+    const doc = await CarRequest.findById(req.params.id).lean();
+    if (!doc || doc.status !== 'open') return res.status(404).json({ error: 'not_found' });
+
+    const { amount, currency } = getUnlockPrice();
+    const requestOut = redactForSeller(doc, { unlocked: false });
+    return res.json({ unlockPrice: amount, currency, request: requestOut });
+  } catch (err) {
+    console.error('[car-requests] detail error:', err);
     return res.status(500).json({ error: 'internal_error', message: err.message });
   }
 });
