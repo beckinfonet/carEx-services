@@ -1,4 +1,4 @@
-const { redactForSeller, SELLER_HIDDEN_FIELDS } = require('../../src/carRequests/redactForSeller');
+const { redactForSeller, revealForSeller, SELLER_HIDDEN_FIELDS } = require('../../src/carRequests/redactForSeller');
 
 const fullDoc = {
   _id: 'r1',
@@ -49,5 +49,28 @@ describe('redactForSeller', () => {
     const input = { ...fullDoc };
     redactForSeller(input, { unlocked: false });
     expect(input.contactPhone).toBe('+996555111222');
+  });
+});
+
+describe('revealForSeller', () => {
+  it('keeps the contact fields and tags unlocked true', () => {
+    const out = revealForSeller(fullDoc);
+    expect(out.contactPhone).toBe('+996555111222');
+    expect(out.contactPhoneVerified).toBe(true);
+    expect(out.telegramUsername).toBe('bishkek_cars');
+    expect(out.telegramVerified).toBe(false);
+    expect(out.unlocked).toBe(true);
+  });
+
+  it('still strips buyerUid', () => {
+    expect(revealForSeller(fullDoc).buyerUid).toBeUndefined();
+  });
+
+  it('accepts a Mongoose doc and does not mutate the input', () => {
+    const input = { ...fullDoc };
+    const mongooseLike = { toObject: () => ({ ...fullDoc }) };
+    expect(revealForSeller(mongooseLike).contactPhone).toBe('+996555111222');
+    revealForSeller(input);
+    expect(input.buyerUid).toBe('buyer-1');
   });
 });
