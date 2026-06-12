@@ -30,6 +30,9 @@ const userSchema = new mongoose.Schema({
     // (opt-out semantics) — absent docs read as enabled via the default, and the
     // broadcast branch keys on `{ $ne: false }` so legacy docs are eligible.
     newListingEnabled: { type: Boolean, default: true },
+    // Slice 3: buyer is notified when a seller unlocks their request contact.
+    // Default ON (opt-out) — absent docs read as enabled via `!== false` gating.
+    requestUnlockEnabled: { type: Boolean, default: true },
     quietHours: {
       start: { type: String, default: '22:00' },
       end: { type: String, default: '08:00' },
