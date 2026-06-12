@@ -2,8 +2,11 @@ const express = require('express');
 const mongoose = require('mongoose');
 const CarRequest = require('../models/CarRequest');
 const { validateRequestInput } = require('./validateRequestInput');
-const { getUnlockPrice } = require('./unlockPrice');
-const { redactForSeller } = require('./redactForSeller');
+const { getUnlockPrice, isPaywallEnabled } = require('./unlockPrice');
+const { redactForSeller, revealForSeller } = require('./redactForSeller');
+const RequestUnlock = require('../models/RequestUnlock');
+const stripe = require('./stripeClient');
+const { notifyRequestUnlocked } = require('./notifyUnlock');
 
 const router = express.Router();
 
@@ -45,6 +48,28 @@ async function getApprovedSeller(uid) {
   const user = await getUser().findOne({ firebaseUid: uid }).lean();
   if (!user || user.sellerStatus !== 'APPROVED') return null;
   return user;
+}
+
+async function hasUnlocked(requestId, sellerUid) {
+  return !!(await RequestUnlock.findOne({ requestId, sellerUid }).lean());
+}
+
+// Record a new unlock (idempotent on the unique index), bump the count, and
+// notify the buyer. Returns true on a fresh unlock, false if it already existed.
+async function recordUnlockAndNotify(reqDoc, sellerUid, { amount, currency, paymentIntentId }) {
+  try {
+    await RequestUnlock.create({ requestId: reqDoc._id, sellerUid, paymentIntentId: paymentIntentId || null, amount, currency });
+  } catch (err) {
+    if (err && err.code === 11000) return false; // already unlocked — no double count/notify
+    throw err;
+  }
+  await CarRequest.updateOne({ _id: reqDoc._id }, { $inc: { unlockCount: 1 } });
+  try {
+    await notifyRequestUnlocked(reqDoc);
+  } catch (e) {
+    console.error('[car-requests] unlock notify failed:', e.message);
+  }
+  return true;
 }
 
 // POST /api/car-requests — create
@@ -126,10 +151,14 @@ router.get('/', async (req, res) => {
     }
 
     const rows = await CarRequest.find(filter).sort({ createdAt: -1 }).lean();
+    const ids = rows.map((r) => r._id);
+    const unlocks = await RequestUnlock.find({ sellerUid: callerUid, requestId: { $in: ids } }).select('requestId').lean();
+    const unlockedSet = new Set(unlocks.map((u) => String(u.requestId)));
     const { amount, currency } = getUnlockPrice();
-    // No RequestUnlock model until Slice 3 — every row is locked for now.
-    const requests = rows.map((r) => redactForSeller(r, { unlocked: false }));
-    return res.json({ unlockPrice: amount, currency, requests });
+    const requests = rows.map((r) =>
+      unlockedSet.has(String(r._id)) ? revealForSeller(r) : redactForSeller(r, { unlocked: false })
+    );
+    return res.json({ unlockPrice: amount, currency, paywallEnabled: isPaywallEnabled(), requests });
   } catch (err) {
     console.error('[car-requests] browse error:', err);
     return res.status(500).json({ error: 'internal_error', message: err.message });
@@ -229,13 +258,109 @@ router.get('/:id', async (req, res) => {
       return res.status(404).json({ error: 'not_found' });
     }
     const doc = await CarRequest.findById(req.params.id).lean();
-    if (!doc || doc.status !== 'open') return res.status(404).json({ error: 'not_found' });
+    if (!doc) return res.status(404).json({ error: 'not_found' });
+
+    const unlocked = await hasUnlocked(doc._id, callerUid);
+    // A non-unlocked seller only sees open requests; an unlocked seller can view
+    // their already-revealed request even after it closes.
+    if (!unlocked && doc.status !== 'open') return res.status(404).json({ error: 'not_found' });
 
     const { amount, currency } = getUnlockPrice();
-    const requestOut = redactForSeller(doc, { unlocked: false });
-    return res.json({ unlockPrice: amount, currency, request: requestOut });
+    const requestOut = unlocked ? revealForSeller(doc) : redactForSeller(doc, { unlocked: false });
+    return res.json({ unlockPrice: amount, currency, paywallEnabled: isPaywallEnabled(), request: requestOut });
   } catch (err) {
     console.error('[car-requests] detail error:', err);
+    return res.status(500).json({ error: 'internal_error', message: err.message });
+  }
+});
+
+// POST /api/car-requests/:id/unlock — free / already-unlocked path
+router.post('/:id/unlock', async (req, res) => {
+  try {
+    const callerUid = req.auth && req.auth.uid;
+    if (!callerUid) return res.status(401).json({ error: 'unauthorized' });
+    const seller = await getApprovedSeller(callerUid);
+    if (!seller) return res.status(403).json({ error: 'not_approved_seller' });
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ error: 'not_found' });
+
+    const doc = await CarRequest.findById(req.params.id);
+    if (!doc) return res.status(404).json({ error: 'not_found' });
+
+    if (await hasUnlocked(doc._id, callerUid)) {
+      return res.json({ request: revealForSeller(doc) });
+    }
+    if (doc.status !== 'open') return res.status(404).json({ error: 'not_found' });
+    if (isPaywallEnabled()) return res.status(409).json({ error: 'payment_required' });
+
+    const { currency } = getUnlockPrice();
+    await recordUnlockAndNotify(doc, callerUid, { amount: 0, currency, paymentIntentId: null });
+    const fresh = await CarRequest.findById(doc._id);
+    return res.json({ request: revealForSeller(fresh) });
+  } catch (err) {
+    console.error('[car-requests] unlock error:', err);
+    return res.status(500).json({ error: 'internal_error', message: err.message });
+  }
+});
+
+// POST /api/car-requests/:id/unlock/payment-intent — Stripe step 1
+router.post('/:id/unlock/payment-intent', async (req, res) => {
+  try {
+    const callerUid = req.auth && req.auth.uid;
+    if (!callerUid) return res.status(401).json({ error: 'unauthorized' });
+    const seller = await getApprovedSeller(callerUid);
+    if (!seller) return res.status(403).json({ error: 'not_approved_seller' });
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ error: 'not_found' });
+
+    const doc = await CarRequest.findById(req.params.id).lean();
+    if (!doc) return res.status(404).json({ error: 'not_found' });
+    if (await hasUnlocked(doc._id, callerUid)) return res.json({ alreadyUnlocked: true });
+    if (doc.status !== 'open') return res.status(404).json({ error: 'not_found' });
+
+    const { amount, currency } = getUnlockPrice();
+    const intent = await stripe.paymentIntents.create({
+      amount,
+      currency: currency.toLowerCase(),
+      metadata: { requestId: String(doc._id), sellerUid: callerUid, kind: 'request_unlock' },
+    });
+    return res.json({ clientSecret: intent.client_secret, paymentIntentId: intent.id, amount, currency });
+  } catch (err) {
+    console.error('[car-requests] unlock intent error:', err);
+    return res.status(500).json({ error: 'internal_error', message: err.message });
+  }
+});
+
+// POST /api/car-requests/:id/unlock/confirm — Stripe step 2
+router.post('/:id/unlock/confirm', async (req, res) => {
+  try {
+    const callerUid = req.auth && req.auth.uid;
+    if (!callerUid) return res.status(401).json({ error: 'unauthorized' });
+    const seller = await getApprovedSeller(callerUid);
+    if (!seller) return res.status(403).json({ error: 'not_approved_seller' });
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ error: 'not_found' });
+
+    const doc = await CarRequest.findById(req.params.id);
+    if (!doc) return res.status(404).json({ error: 'not_found' });
+    if (await hasUnlocked(doc._id, callerUid)) {
+      return res.json({ request: revealForSeller(doc) });
+    }
+
+    const { paymentIntentId } = req.body || {};
+    if (!paymentIntentId) return res.status(400).json({ error: 'missing_payment_intent' });
+
+    const intent = await stripe.paymentIntents.retrieve(paymentIntentId);
+    if (!intent || intent.status !== 'succeeded') {
+      return res.status(402).json({ error: 'payment_not_completed' });
+    }
+    if (!intent.metadata || intent.metadata.requestId !== String(doc._id) || intent.metadata.sellerUid !== callerUid) {
+      return res.status(400).json({ error: 'payment_intent_mismatch' });
+    }
+
+    const { currency } = getUnlockPrice();
+    await recordUnlockAndNotify(doc, callerUid, { amount: intent.amount, currency, paymentIntentId });
+    const fresh = await CarRequest.findById(doc._id);
+    return res.json({ request: revealForSeller(fresh) });
+  } catch (err) {
+    console.error('[car-requests] unlock confirm error:', err);
     return res.status(500).json({ error: 'internal_error', message: err.message });
   }
 });
