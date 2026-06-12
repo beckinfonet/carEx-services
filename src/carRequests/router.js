@@ -106,6 +106,7 @@ router.put('/:id', async (req, res) => {
 
     const doc = await findOwned(req.params.id, buyerUid);
     if (!doc) return res.status(404).json({ error: 'not_found' });
+    if (doc.status !== 'open') return res.status(409).json({ error: 'request_not_editable' });
 
     const { errors, value } = validateRequestInput(req.body);
     if (errors.length) return res.status(400).json({ error: 'validation_error', details: errors });

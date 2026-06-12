@@ -197,6 +197,37 @@ describe('PUT /api/car-requests/:id', () => {
       .send({ makeId: make._id.toString(), budgetMax: 20000 });
     expect(res.status).toBe(404);
   });
+
+  it('refuses to edit a closed request (409)', async () => {
+    const { make } = await seedCatalog();
+    await seedVerifiedBuyer();
+    const doc = await CarRequest.create({
+      buyerUid: 'buyer-1', makeId: make._id, makeName: 'Toyota', budgetMax: 12000,
+      contactPhone: '+996555111222', contactPhoneVerified: true, status: 'closed',
+      expiresAt: new Date(Date.now() + 1e9),
+    });
+    const res = await request(app)
+      .put(`/api/car-requests/${doc._id}`)
+      .send({ makeId: make._id.toString(), budgetMax: 20000 });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('request_not_editable');
+  });
+
+  it('resets previously-set optional fields when omitted on edit', async () => {
+    const { make } = await seedCatalog();
+    await seedVerifiedBuyer();
+    const doc = await CarRequest.create({
+      buyerUid: 'buyer-1', makeId: make._id, makeName: 'Toyota', budgetMax: 12000,
+      budgetMin: 8000, note: 'old note', contactPhone: '+996555111222',
+      contactPhoneVerified: true, status: 'open', expiresAt: new Date(Date.now() + 1e9),
+    });
+    const res = await request(app)
+      .put(`/api/car-requests/${doc._id}`)
+      .send({ makeId: make._id.toString(), budgetMax: 20000 });
+    expect(res.status).toBe(200);
+    expect(res.body.budgetMin).toBeNull();
+    expect(res.body.note).toBeNull();
+  });
 });
 
 describe('PATCH /api/car-requests/:id/close', () => {
