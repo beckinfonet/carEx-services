@@ -7,6 +7,9 @@ const ALLOWED_STRING_FIELDS = [
   'note',
 ];
 
+const ALLOWED_CURRENCIES = ['KGS', 'USD'];
+const DEFAULT_CURRENCY = 'KGS';
+
 function toNumberOrNull(raw) {
   if (raw === undefined || raw === null || raw === '') return null;
   const n = Number(raw);
@@ -81,6 +84,12 @@ function validateRequestInput(body = {}) {
   if (body.telegramUsername && String(body.telegramUsername).trim() !== '') {
     value.telegramUsername = String(body.telegramUsername).trim().replace(/^@+/, '');
   }
+
+  // currency (optional, normalize to KGS|USD; forgiving — unrecognized falls back to KGS)
+  const normalizedCurrency = String(body.currency || '').trim().toUpperCase();
+  value.currency = ALLOWED_CURRENCIES.includes(normalizedCurrency)
+    ? normalizedCurrency
+    : DEFAULT_CURRENCY;
 
   return { errors, value };
 }

@@ -100,7 +100,6 @@ router.post('/', async (req, res) => {
       contactPhone: buyer.phoneNumber,
       contactPhoneVerified: true,
       telegramVerified: false,
-      currency: 'KGS',
       status: 'open',
       expiresAt: new Date(Date.now() + REQUEST_TTL_DAYS * 24 * 60 * 60 * 1000),
     });
@@ -195,6 +194,7 @@ router.put('/:id', async (req, res) => {
     doc.makeName = makeDoc.name;
     doc.modelName = modelDoc ? modelDoc.name : null;
     doc.budgetMax = value.budgetMax;
+    doc.currency = value.currency;
     doc.budgetMin = value.budgetMin ?? null;
     doc.yearMin = value.yearMin ?? null;
     doc.yearMax = value.yearMax ?? null;

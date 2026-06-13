@@ -11,7 +11,7 @@ const carRequestSchema = new mongoose.Schema(
     yearMax: { type: Number, default: null },
     budgetMin: { type: Number, default: null },
     budgetMax: { type: Number, required: true },
-    currency: { type: String, default: 'KGS' },
+    currency: { type: String, enum: ['KGS', 'USD'], default: 'KGS' },
     exteriorColor: { type: String, default: null },
     interiorColor: { type: String, default: null },
     interiorMaterial: { type: String, default: null },

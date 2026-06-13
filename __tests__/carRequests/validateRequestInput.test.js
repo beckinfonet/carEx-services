@@ -44,4 +44,21 @@ describe('validateRequestInput', () => {
     const { value } = validateRequestInput({ ...validBody, hackerField: 'x' });
     expect(value.hackerField).toBeUndefined();
   });
+
+  it('defaults currency to KGS when absent', () => {
+    const { value } = validateRequestInput(validBody);
+    expect(value.currency).toBe('KGS');
+  });
+
+  it('accepts and uppercases a USD currency', () => {
+    const { errors, value } = validateRequestInput({ ...validBody, currency: 'usd' });
+    expect(errors).toEqual([]);
+    expect(value.currency).toBe('USD');
+  });
+
+  it('coerces an unrecognized currency to KGS', () => {
+    const { errors, value } = validateRequestInput({ ...validBody, currency: 'EUR' });
+    expect(errors).toEqual([]);
+    expect(value.currency).toBe('KGS');
+  });
 });
