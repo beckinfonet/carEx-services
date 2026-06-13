@@ -90,7 +90,19 @@ async function fanOut(uid, notification, payloadData) {
   let tokens = (rows || []).map((r) => r.token).filter(Boolean);
   if (!tokens.length) return { ok: true, delivered: 0 };
 
-  const message = { notification, data: payloadData };
+  // Set the Android channel + priority explicitly rather than relying on the
+  // manifest default_notification_channel_id (fragile across manifest merges) —
+  // without a resolvable channel, Android 8+ silently drops the lock-screen
+  // notification even though FCM reports delivery. Harmless on iOS.
+  const message = {
+    notification,
+    data: payloadData,
+    android: {
+      priority: 'high',
+      notification: { channelId: 'carex_default', sound: 'default' },
+    },
+    apns: { payload: { aps: { sound: 'default' } } },
+  };
 
   const admin = ensureInitialized();
   const messaging = admin.messaging();
